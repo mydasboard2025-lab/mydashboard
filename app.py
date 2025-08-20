@@ -1,4 +1,6 @@
-# app.py
+# app.py (teşhisli)
+import os
+import glob
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,60 +9,82 @@ import plotly.express as px
 st.set_page_config(page_title="DIO Günlük Bar", page_icon="📊", layout="wide")
 st.title("📊 DIO Model Dealer – Model Bazlı Günlük DIO")
 
-EXCEL_PATH = "dashboard deneme.xlsx"
-SHEET_NAME = "DIO Model Dealer"
+# ---- AYARLAR ----
+EXCEL_PATH_DEFAULT = "dashboard deneme.xlsx"     # repodaki dosya adın
+SHEET_NAME_DEFAULT = "DIO Model Dealer"          # hedef sheet
 
-# Konum sabitlemeleri (sorunda verdiğin düzene göre)
-ROW_DATES = 5        # E6 sağa → başlık satırı (0-index: 5 => 6. satır)
-COL_MODEL = 3        # D sütunu (0-index: 3)
-ROW_MODELS_START = 8 # D9 ve aşağısı (0-index: 8 => 9. satır)
+# ---- DOSYA KONTROL / YÜKLEME SEÇENEKLERİ ----
+st.sidebar.header("Veri Kaynağı")
+mode = st.sidebar.radio("Excel nasıl yüklensin?", ["Repo dosyası", "Dosya yükle (Upload)"], index=0)
 
-@st.cache_data
-def load_long_df(path, sheet):
-    # 1) Ham oku (header=None) -> ParserError riskini azaltır
-    raw = pd.read_excel(path, sheet_name=sheet, header=None, engine="openpyxl")
+excel_bytes = None
+excel_path = None
+if mode == "Repo dosyası":
+    excel_path = st.sidebar.text_input("Repo içi yol/isim", EXCEL_PATH_DEFAULT)
+    st.info(f"Çalışma klasörü: `{os.getcwd()}`")
+    st.caption("Bu klasördeki dosyalar:")
+    st.code("\n".join(glob.glob("*")))
+    if not os.path.exists(excel_path):
+        st.error(f"Excel bulunamadı: `{excel_path}`. Dosya adını/yolunu kontrol et (büyük-küçük harf, boşluk).")
+        st.stop()
+else:
+    up = st.sidebar.file_uploader("Excel yükle (.xlsx)", type=["xlsx"])
+    if up is None:
+        st.warning("Devam etmek için bir Excel yükleyin.")
+        st.stop()
+    excel_bytes = up.read()
 
-    # 2) Tarih kolonlarını tespit et (E sütunundan sağa)
-    date_cells = raw.iloc[ROW_DATES, COL_MODEL+1:]        # E6→
-    date_parsed = pd.to_datetime(date_cells, dayfirst=True, errors="coerce")
-    valid_mask = date_parsed.notna()
-    date_cols_idx = np.where(valid_mask.values)[0] + (COL_MODEL + 1)  # gerçek kolon indeksleri
-    dates = date_parsed[valid_mask].reset_index(drop=True)
-
-    if len(date_cols_idx) == 0:
-        raise ValueError("Tarih başlıkları (E6 ve sağa) okunamadı. Lütfen sheet yapısını kontrol edin.")
-
-    # 3) Model sütununu (D9↓) al
-    models = raw.iloc[ROW_MODELS_START:, COL_MODEL].astype(str).str.strip()
-    # "Yeni BMW" veya "BMW" ile başlayanları filtrele
-    model_mask = models.str.startswith(("Yeni BMW", "BMW"), na=False)
-    models = models[model_mask].reset_index(drop=True)
-
-    # 4) DIO değer matrisini al (modellerin yanındaki tarih kolonları)
-    dio_mat = raw.iloc[ROW_MODELS_START:, date_cols_idx]           # satırlar: modeller
-    dio_mat = dio_mat[model_mask.values]                           # aynı maskeyi uygula
-    dio_mat.columns = dates                                        # kolon adları datetime
-
-    # 5) Uzun formata dönüştür
-    df = pd.concat([models.rename("Model"), dio_mat.reset_index(drop=True)], axis=1)
-    long_df = df.melt(id_vars=["Model"], var_name="Date", value_name="DIO")
-
-    # 6) Tip temizliği
-    long_df["Date"] = pd.to_datetime(long_df["Date"], dayfirst=True, errors="coerce")
-    long_df["DIO"] = (
-        long_df["DIO"].astype(str)
-        .str.replace("%", "", regex=False)
-        .str.replace(" ", "", regex=False)
-        .str.replace(".", "", regex=False)   # binlik noktaları
-        .str.replace(",", ".", regex=False)  # ondalık virgül
-    )
-    long_df["DIO"] = pd.to_numeric(long_df["DIO"], errors="coerce")
-
-    # Boş tarihleri ve tamamen NaN DIO'ları ele
-    long_df = long_df.dropna(subset=["Date"])
-    return long_df
-
+# ---- SHEET LİSTELE ----
 try:
-    long_df = load_long_df(EXCEL_PATH, SHEET_NAME)
+    if excel_bytes:
+        xls = pd.ExcelFile(excel_bytes, engine="openpyxl")
+    else:
+        xls = pd.ExcelFile(excel_path, engine="openpyxl")
+    st.success("Excel açıldı ✔")
+    st.caption("Bulunan sheet'ler:")
+    st.write(xls.sheet_names)
 except Exception as e:
-    st.error(f"Veri okunurken sorun oluştu: {e}")
+    st.exception(e)
+    st.stop()
+
+sheet_name = st.sidebar.selectbox("Sheet seç", options=xls.sheet_names,
+                                  index=xls.sheet_names.index(SHEET_NAME_DEFAULT) if SHEET_NAME_DEFAULT in xls.sheet_names else 0)
+
+# ---- PARAMETRELER (koordinatlar) ----
+st.sidebar.header("Yerleşim Parametreleri")
+ROW_DATES = st.sidebar.number_input("Tarih satırı (0-index, E6 → 5)", value=5, step=1)
+COL_MODEL = st.sidebar.number_input("Model sütunu (0-index, D → 3)", value=3, step=1)
+ROW_MODELS_START = st.sidebar.number_input("Model başlangıç satırı (0-index, D9 → 8)", value=8, step=1)
+
+# ---- HAM OKUMA (header=None) ----
+try:
+    raw = pd.read_excel(xls, sheet_name=sheet_name, header=None, engine="openpyxl")
+    st.success(f"Sheet okundu ✔  Şekil: {raw.shape}")
+except Exception as e:
+    st.exception(e)
+    st.stop()
+
+with st.expander("Ham veri ilk 12×20 önizleme"):
+    st.dataframe(raw.iloc[:12, :20])
+
+# ---- TARİHLERİ ÇEK (E6 →) ----
+try:
+    date_header_row = raw.iloc[int(ROW_DATES), int(COL_MODEL)+1:].astype(str).str.strip()
+    date_parsed = pd.to_datetime(date_header_row, dayfirst=True, errors="coerce")
+    if date_parsed.isna().mean() > 0.5:
+        # dd.mm.yyyy dene
+        date_parsed = pd.to_datetime(date_header_row, format="%d.%m.%Y", errors="coerce")
+    valid_dates_mask = date_parsed.notna()
+    date_cols_idx = np.where(valid_dates_mask.values)[0] + (int(COL_MODEL) + 1)
+    dates = date_parsed[valid_dates_mask].reset_index(drop=True)
+    st.info(f"Tarih kolon sayısı: {len(dates)} | İlk tarih: {dates.min()} | Son tarih: {dates.max()}")
+    if len(dates) == 0:
+        st.error("Tarih başlıkları bulunamadı. ROW_DATES / COL_MODEL parametrelerini kontrol edin.")
+        st.stop()
+except Exception as e:
+    st.exception(e)
+    st.stop()
+
+# ---- MODELLERİ ÇEK (D9 ↓) ----
+try:
+    models_series = raw.iloc[int(ROW_MODELS_START):, int(COL_MODEL)].as_]()_
