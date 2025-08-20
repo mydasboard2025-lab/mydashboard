@@ -87,4 +87,74 @@ except Exception as e:
 
 # ---- MODELLERİ ÇEK (D9 ↓) ----
 try:
-    models_series = raw.iloc[int(ROW_MODELS_START):, int(COL_MODEL)].as_]()_
+    models_series = raw.iloc[int(ROW_MODELS_START):, int(COL_MODEL)].astype(str).str.strip()
+    model_mask = models_series.str.startswith(("Yeni BMW", "BMW"), na=False)
+    models = models_series[model_mask].reset_index(drop=True)
+    st.info(f"Model satır sayısı: {len(models)} (Yeni BMW/BMW ile başlayanlar)")
+    if len(models) == 0:
+        st.warning("Model bulunamadı. ROW_MODELS_START veya model metinlerini kontrol et.")
+except Exception as e:
+    st.exception(e)
+    st.stop()
+
+# ---- DIO MATRİSİ ----
+try:
+    dio_mat = raw.iloc[int(ROW_MODELS_START):, date_cols_idx]
+    dio_mat = dio_mat[model_mask.values]
+    dio_mat.columns = dates
+    df_wide = pd.concat([models.rename("Model"), dio_mat.reset_index(drop=True)], axis=1)
+    long_df = df_wide.melt(id_vars=["Model"], var_name="Date", value_name="DIO")
+    long_df["Date"] = pd.to_datetime(long_df["Date"], errors="coerce")
+    # DIO temizliği
+    long_df["DIO"] = (
+        long_df["DIO"].astype(str)
+        .str.replace(r"[^0-9,.\-]", "", regex=True)
+        .str.replace(",", ".", regex=False)
+    )
+    long_df["DIO"] = pd.to_numeric(long_df["DIO"], errors="coerce")
+    long_df = long_df.dropna(subset=["Date"])
+    st.success(f"Uzun form oluşturuldu ✔  Satır: {len(long_df)}  Modeller: {long_df['Model'].nunique()}")
+except Exception as e:
+    st.exception(e)
+    st.stop()
+
+with st.expander("Uzun form ilk 15 satır"):
+    st.dataframe(long_df.head(15))
+
+# ---- FİLTRELER ----
+st.sidebar.header("Filtreler")
+all_models = sorted(long_df["Model"].dropna().unique().tolist())
+selected_models = st.sidebar.multiselect("Model seçin", all_models,
+                                         default=all_models[:3] if len(all_models) > 3 else all_models)
+
+min_d, max_d = long_df["Date"].min(), long_df["Date"].max()
+date_range = st.sidebar.date_input("Tarih aralığı",
+                                   value=(min_d.date() if pd.notna(min_d) else None,
+                                          max_d.date() if pd.notna(max_d) else None))
+
+f = long_df.copy()
+if selected_models:
+    f = f[f["Model"].isin(selected_models)]
+if isinstance(date_range, (list, tuple)) and len(date_range) == 2 and all(date_range):
+    start, end = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+    f = f[(f["Date"] >= start) & (f["Date"] <= end)]
+
+st.caption(f"Filtre sonrası satır: {len(f)} | Model sayısı: {f['Model'].nunique()}")
+
+# ---- GRAFİK ----
+st.subheader("📈 Günlük DIO – Bar Chart")
+if f.empty or f["DIO"].dropna().empty:
+    st.warning("Grafik için uygun veri bulunamadı. (Sheet/koordinatlar ya da filtreler veriyi boşaltmış olabilir.)")
+else:
+    f = f.sort_values("Date")
+    color_kw = {"color": "Model"} if selected_models and len(selected_models) > 1 else {}
+    fig = px.bar(f, x="Date", y="DIO", **color_kw,
+                 labels={"Date": "Tarih", "DIO": "DIO Adedi"},
+                 title="Günlük DIO")
+    st.plotly_chart(fig, use_container_width=True)
+
+# ---- TABLO ----
+st.subheader("📋 Veri Önizleme")
+n = st.slider("Kaç satır gösterilsin?", 10, max(10, len(f)), min(500, len(f)))
+st.dataframe(f.head(n), use_container_width=True)
+
