@@ -14,27 +14,21 @@ def find_latest_excel(data_dir: Path) -> Path | None:
     files = list(data_dir.glob("*.xlsx"))
     if not files:
         return None
+    # 'fiyat' geçenleri öne al, sonra mtime DESC, sonra ada göre
     files.sort(key=lambda p: ("fiyat" not in p.name.lower(), -p.stat().st_mtime, p.name.lower()))
     return files[0]
 
 def to_numeric_locale_aware(s: pd.Series) -> pd.Series:
-    """Virgül ondalık, nokta binlik, para birimi/metin temizliği yaparak güvenli numeric çeviri."""
-    # stringe çevir
+    """Virgül ondalık, nokta binlik, para/metin temizliği ile güvenli numeric çeviri."""
     t = s.astype(str).str.strip()
-    # özel metinleri NaN yap
-    t = t.replace(
-        {
-            "": pd.NA, "-": pd.NA, "—": pd.NA, "–": pd.NA,
-            "N/A": pd.NA, "n/a": pd.NA, "na": pd.NA, "NaN": pd.NA,
-            "#N/A": pd.NA, "#NA": pd.NA, "#VALUE!": pd.NA,
-        }
-    )
-    # para/etiket kırp: harf ve para sembollerini sil
-    t = t.str.replace(r"[^\d,.\-]", "", regex=True)
-    # binlik noktalarını sil (…123.456,78 → 123456,78)
-    t = t.str.replace(r"\.(?=\d{3}(\D|$))", "", regex=True)
-    # ondalık virgülü noktaya çevir
-    t = t.str.replace(",", ".", regex=False)
+    t = t.replace({
+        "": pd.NA, "-": pd.NA, "—": pd.NA, "–": pd.NA,
+        "N/A": pd.NA, "n/a": pd.NA, "na": pd.NA, "NaN": pd.NA,
+        "#N/A": pd.NA, "#NA": pd.NA, "#VALUE!": pd.NA,
+    })
+    t = t.str.replace(r"[^\d,.\-]", "", regex=True)         # para/etiket sil
+    t = t.str.replace(r"\.(?=\d{3}(\D|$))", "", regex=True) # binlik noktası sil
+    t = t.str.replace(",", ".", regex=False)                # ondalık virgülü noktaya
     return pd.to_numeric(t, errors="coerce")
 
 def parse_percent_series_mixed(s: pd.Series) -> pd.Series:
@@ -50,40 +44,51 @@ def parse_percent_series_mixed(s: pd.Series) -> pd.Series:
 
 @st.cache_data(show_spinner=False)
 def load_data_auto(path: Path) -> pd.DataFrame:
+    # Her zaman ilk sheet + 4. satırdan (skiprows=3) D:Q aralığı
     df = pd.read_excel(
         path,
-        sheet_name=0,   # ilk sheet
+        sheet_name=0,
         usecols="D:Q",
-        skiprows=3,     # 4. satırdan başla
+        skiprows=3,
         header=None,
         engine="openpyxl",
     )
     df.columns = [
-        "Marka", "Model", "Paket", "_G",
+        "Marka",           # D
+        "Model",           # E
+        "Paket",           # F
+        "_G",              # G (kullanılmıyor)
         "Stoktaki en uygun otomobil fiyatı",  # H
         "Fiyat konumu",    # I
         "İndirim oranı",   # J
-        "_K", "_L", "_M", "_N",
+        "_K", "_L", "_M", "_N",              # K..N
         "İndirimli fiyat",                   # O
         "İndirimli fiyat konumu",            # P
         "Spec adjusted fiyat konumu",        # Q
     ]
 
+    # --- 1) Önce grup sınırlarını oluştur (D sütunu boş satır = ayraç) ---
+    df["Marka"] = df["Marka"].replace(r"^\s*$", pd.NA, regex=True)
+    df["__group_id__"] = df["Marka"].isna().cumsum()   # <-- AYRAÇLAR KORUNDU
+
+    # --- 2) Şimdi H filtresini uygula; grup_id korunur ---
     h_col = "Stoktaki en uygun otomobil fiyatı"
     h_num = to_numeric_locale_aware(df[h_col])
 
-    # Excel #N/A → NaN olur; ayrıca numeric NaN da buraya girer
+    # Excel #N/A genelde NaN olur; ayrıca numerik NaN'lar da düşsün
     is_na = df[h_col].isna() | h_num.isna()
+    # 0 olanlar düşsün
     is_zero = h_num.fillna(0).eq(0)
 
     df = df[~(is_na | is_zero)].copy()
 
-    df["Marka"] = df["Marka"].replace(r"^\s*$", pd.NA, regex=True)
-    df["__group_id__"] = df["Marka"].isna().cumsum()
+    # Ayraç (Marka boş) satırları zaten göstermiyoruz
+    # Ama grup kimliği korunmuş durumda
+
+    # Yüzde sütunu normalize (0-1)
     df["İndirim oranı"] = parse_percent_series_mixed(df["İndirim oranı"])
 
     return df
-
 
 def fmt_numeric(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["Stoktaki en uygun otomobil fiyatı", "İndirimli fiyat"]:
@@ -103,13 +108,11 @@ if EXCEL_PATH is None or not EXCEL_PATH.exists():
     st.error("`data/` klasöründe .xlsx bulunamadı. Lütfen Excel dosyanı `data/` içine yükle.")
     st.stop()
 
-st.caption(f"Kullanılan dosya: `{EXCEL_PATH.name}` (data/ içindeki en yeni .xlsx)")
+st.markdown("## BMW Rakip Karşılaştırma")
 
 df_raw = load_data_auto(EXCEL_PATH)
 
-st.markdown("## BMW Rakip Karşılaştırma")
-
-# Filtreler BMW ile sınırlı
+# Filtre kaynakları: sadece BMW
 df_bmw = df_raw[(df_raw["Marka"].astype(str).str.strip().str.upper() == "BMW")]
 df_bmw = df_bmw[df_bmw["Model"].notna() & df_bmw["Paket"].notna()]
 
