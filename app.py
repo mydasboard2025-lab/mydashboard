@@ -5,7 +5,7 @@ from pathlib import Path
 st.set_page_config(page_title="Fiyat Karşılaştırması Dashboard", layout="wide")
 
 # ---- Dosya Yolları (repo içi) ----
-EXCEL_PATH = Path("data") / "Fiyat Karşılaştırması - 08.08.2025.xlsx"
+EXCEL_PATH = Path("data") / "Fiyat Karşılaştırması_v1.xlsx"
 IMAGE_PATH = Path("assets") / "Fiyat Konumu tablo.png"
 
 # ---- Yardımcılar ----
