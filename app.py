@@ -7,52 +7,54 @@ st.set_page_config(page_title="Fiyat Karşılaştırması Dashboard", layout="wi
 
 DATA_DIR = Path("data")
 
-# ------------ Helpers ------------
+# ---------- Helpers ----------
 def find_latest_excel(data_dir: Path) -> Path | None:
     if not data_dir.exists():
         return None
     files = list(data_dir.glob("*.xlsx"))
     if not files:
         return None
-    # "fiyat" geçenlere öncelik ver → sonra mtime DESC → sonra ada göre
     files.sort(key=lambda p: ("fiyat" not in p.name.lower(), -p.stat().st_mtime, p.name.lower()))
     return files[0]
 
-def to_numeric_safe(series: pd.Series) -> pd.Series:
-    if series.dtype == "object":
-        s = series.astype(str).str.replace("%", "", regex=False).str.replace(" ", "", regex=False)
-        s = s.str.replace(",", ".", regex=False)
-        s = s.str.replace(r"\.(?=\d{3}(\D|$))", "", regex=True)
-        return pd.to_numeric(s, errors="coerce")
-    return pd.to_numeric(series, errors="coerce")
+def to_numeric_locale_aware(s: pd.Series) -> pd.Series:
+    """Virgül ondalık, nokta binlik, para birimi/metin temizliği yaparak güvenli numeric çeviri."""
+    # stringe çevir
+    t = s.astype(str).str.strip()
+    # özel metinleri NaN yap
+    t = t.replace(
+        {
+            "": pd.NA, "-": pd.NA, "—": pd.NA, "–": pd.NA,
+            "N/A": pd.NA, "n/a": pd.NA, "na": pd.NA, "NaN": pd.NA,
+            "#N/A": pd.NA, "#NA": pd.NA, "#VALUE!": pd.NA,
+        }
+    )
+    # para/etiket kırp: harf ve para sembollerini sil
+    t = t.str.replace(r"[^\d,.\-]", "", regex=True)
+    # binlik noktalarını sil (…123.456,78 → 123456,78)
+    t = t.str.replace(r"\.(?=\d{3}(\D|$))", "", regex=True)
+    # ondalık virgülü noktaya çevir
+    t = t.str.replace(",", ".", regex=False)
+    return pd.to_numeric(t, errors="coerce")
 
 def parse_percent_series_mixed(s: pd.Series) -> pd.Series:
-    # Excel "Percentage" ise 0-1 float gelir; metinse normalize eder.
     if pd.api.types.is_numeric_dtype(s):
         ser = pd.to_numeric(s, errors="coerce")
         if ser.notna().sum() and (ser.dropna() > 1).mean() > 0.5:
             ser = ser / 100.0
         return ser
-    txt = s.astype(str).str.strip().str.replace("%", "", regex=False).str.replace(" ", "", regex=False)
-    txt = txt.str_replace(",", ".", regex=False) if hasattr(txt, "str_replace") else txt.str.replace(",", ".", regex=False)
-    txt = txt.str.replace(r"\.(?=\d{3}(\D|$))", "", regex=True)
-    def keep_first_num(x: str) -> str:
-        m = re.findall(r"-?\d+(?:\.\d+)?", x)
-        return m[0] if m else ""
-    cleaned = txt.apply(keep_first_num)
-    ser = pd.to_numeric(cleaned, errors="coerce")
+    ser = to_numeric_locale_aware(s)
     if ser.notna().sum() and (ser.dropna() > 1).mean() > 0.5:
         ser = ser / 100.0
     return ser
 
 @st.cache_data(show_spinner=False)
 def load_data_auto(path: Path) -> pd.DataFrame:
-    # Her zaman ilk sheet + 4. satırdan başlat (skiprows=3), D:Q aralığı
     df = pd.read_excel(
         path,
-        sheet_name=0,
+        sheet_name=0,   # ilk sheet
         usecols="D:Q",
-        skiprows=3,
+        skiprows=3,     # 4. satırdan başla
         header=None,
         engine="openpyxl",
     )
@@ -60,33 +62,37 @@ def load_data_auto(path: Path) -> pd.DataFrame:
         "Marka",           # D
         "Model",           # E
         "Paket",           # F
-        "_G",
+        "_G",              # G (kullanılmıyor)
         "Stoktaki en uygun otomobil fiyatı",  # H
         "Fiyat konumu",    # I
         "İndirim oranı",   # J
-        "_K", "_L", "_M", "_N",
+        "_K", "_L", "_M", "_N",              # K..N
         "İndirimli fiyat",                   # O
         "İndirimli fiyat konumu",            # P
         "Spec adjusted fiyat konumu",        # Q
     ]
 
-    # H sütunu 0 veya #N/A olan satırları tamamen çıkar
+    # ---- H sütununu normalize edip 0/#N/A satırlarını düş ----
     h_col = "Stoktaki en uygun otomobil fiyatı"
 
-    # 1) #N/A yakala (pandas çoğu zaman NaN'a çevirir, ama string olarak da gelebilir)
-    is_hash_na = df[h_col].astype(str).str.strip().str.upper().isin({"#N/A", "#NA"})
+    # 1) metin ve yerel biçimleri güvenle sayıya çevir
+    h_num = to_numeric_locale_aware(df[h_col])
 
-    # 2) Numerik sıfır yakala
-    h_num = pd.to_numeric(df[h_col], errors="coerce")
+    # 2) "0" olanları işaretle
     is_zero = h_num.fillna(pd.NA).eq(0)
 
-    df = df[~(is_hash_na | is_zero)].copy()
+    # 3) #N/A ve türevlerini (metin kalmışsa da) işaretle
+    is_hash_na_text = df[h_col].astype(str).str.strip().str.upper().isin({"#N/A", "#NA", "N/A"})
 
-    # Grup ayrımı için marka boşluklarını normalize et
+    # 4) hepsini birlikte ele
+    mask_drop = is_zero | is_hash_na_text
+
+    df = df[~mask_drop].copy()
+
+    # ---- Grup ayrımı ve yüzde normalize ----
     df["Marka"] = df["Marka"].replace(r"^\s*$", pd.NA, regex=True)
     df["__group_id__"] = df["Marka"].isna().cumsum()
 
-    # Yüzde sütunu normalize (0-1)
     df["İndirim oranı"] = parse_percent_series_mixed(df["İndirim oranı"])
 
     return df
@@ -94,29 +100,28 @@ def load_data_auto(path: Path) -> pd.DataFrame:
 def fmt_numeric(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["Stoktaki en uygun otomobil fiyatı", "İndirimli fiyat"]:
         if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+            df[c] = to_numeric_locale_aware(df[c])
     for c in ["Fiyat konumu", "İndirimli fiyat konumu", "Spec adjusted fiyat konumu"]:
         if c in df.columns:
             conv = pd.to_numeric(df[c], errors="coerce")
             if conv.isna().all():
-                conv = to_numeric_safe(df[c])
+                conv = to_numeric_locale_aware(df[c])
             df[c] = conv
     return df
 
-# ------------ Akış ------------
+# ---------- Flow ----------
 EXCEL_PATH = find_latest_excel(DATA_DIR)
 if EXCEL_PATH is None or not EXCEL_PATH.exists():
     st.error("`data/` klasöründe .xlsx bulunamadı. Lütfen Excel dosyanı `data/` içine yükle.")
     st.stop()
 
-# Bilgi satırı (kullanılan dosya adı)
 st.caption(f"Kullanılan dosya: `{EXCEL_PATH.name}` (data/ içindeki en yeni .xlsx)")
 
 df_raw = load_data_auto(EXCEL_PATH)
 
 st.markdown("## BMW Rakip Karşılaştırma")
 
-# Filtre kaynakları: sadece BMW
+# Filtreler BMW ile sınırlı
 df_bmw = df_raw[(df_raw["Marka"].astype(str).str.strip().str.upper() == "BMW")]
 df_bmw = df_bmw[df_bmw["Model"].notna() & df_bmw["Paket"].notna()]
 
@@ -169,7 +174,7 @@ styled = df_group_fmt.style.apply(highlight_selected, axis=1).format(
         "Fiyat konumu": "{:.1f}",
         "İndirimli fiyat konumu": "{:.1f}",
         "Spec adjusted fiyat konumu": "{:.1f}",
-        "İndirim oranı": "{:.1%}",  # 0.10 -> %10.0
+        "İndirim oranı": "{:.1%}",
     }
 )
 st.dataframe(styled, use_container_width=True, hide_index=True)
