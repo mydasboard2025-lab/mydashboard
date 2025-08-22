@@ -59,43 +59,31 @@ def load_data_auto(path: Path) -> pd.DataFrame:
         engine="openpyxl",
     )
     df.columns = [
-        "Marka",           # D
-        "Model",           # E
-        "Paket",           # F
-        "_G",              # G (kullanılmıyor)
+        "Marka", "Model", "Paket", "_G",
         "Stoktaki en uygun otomobil fiyatı",  # H
         "Fiyat konumu",    # I
         "İndirim oranı",   # J
-        "_K", "_L", "_M", "_N",              # K..N
+        "_K", "_L", "_M", "_N",
         "İndirimli fiyat",                   # O
         "İndirimli fiyat konumu",            # P
         "Spec adjusted fiyat konumu",        # Q
     ]
 
-    # ---- H sütununu normalize edip 0/#N/A satırlarını düş ----
     h_col = "Stoktaki en uygun otomobil fiyatı"
-
-    # 1) metin ve yerel biçimleri güvenle sayıya çevir
     h_num = to_numeric_locale_aware(df[h_col])
 
-    # 2) "0" olanları işaretle
-    is_zero = h_num.fillna(pd.NA).eq(0)
+    # Excel #N/A → NaN olur; ayrıca numeric NaN da buraya girer
+    is_na = df[h_col].isna() | h_num.isna()
+    is_zero = h_num.fillna(0).eq(0)
 
-    # 3) #N/A ve türevlerini (metin kalmışsa da) işaretle
-    is_hash_na_text = df[h_col].astype(str).str.strip().str.upper().isin({"#N/A", "#NA", "N/A"})
+    df = df[~(is_na | is_zero)].copy()
 
-    # 4) hepsini birlikte ele
-    mask_drop = is_zero | is_hash_na_text
-
-    df = df[~mask_drop].copy()
-
-    # ---- Grup ayrımı ve yüzde normalize ----
     df["Marka"] = df["Marka"].replace(r"^\s*$", pd.NA, regex=True)
     df["__group_id__"] = df["Marka"].isna().cumsum()
-
     df["İndirim oranı"] = parse_percent_series_mixed(df["İndirim oranı"])
 
     return df
+
 
 def fmt_numeric(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["Stoktaki en uygun otomobil fiyatı", "İndirimli fiyat"]:
