@@ -93,13 +93,14 @@ if df_selected_bmw.empty:
 group_id = int(df_selected_bmw["__group_id__"].iloc[0])
 df_group = df_raw[(df_raw["__group_id__"] == group_id) & (df_raw["Marka"].notna())].copy()
 
-# Gösterilecek kolonlar
+# Gösterilecek kolonlar (İndirim oranı eklendi)
 display_cols = [
     "Marka",
     "Model",
     "Paket",
     "Stoktaki en uygun otomobil fiyatı",
     "Fiyat konumu",
+    "İndirim oranı",                # <--- eklendi
     "İndirimli fiyat",
     "İndirimli fiyat konumu",
     "Spec adjusted fiyat konumu",
@@ -113,11 +114,29 @@ def highlight_selected(row):
         return ["font-weight: bold;"] * len(row)
     return [""] * len(row)
 
-# Numerik format
+# Numerik format: fiyatlar ve konumlar
+def to_numeric_safe(s):
+    # Nokta/virgül farklarını güvenli çevirmek için
+    if s.dtype == "object":
+        return pd.to_numeric(s.str.replace(".", "", regex=False).str.replace(",", ".", regex=False), errors="coerce")
+    return pd.to_numeric(s, errors="coerce")
+
 def fmt_numeric(df):
-    for c in ["Stoktaki en uygun otomobil fiyatı", "İndirimli fiyat"]:
+    # Fiyat kolonlarını sayı yap
+    price_cols = ["Stoktaki en uygun otomobil fiyatı", "İndirimli fiyat"]
+    for c in price_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Konum kolonlarını tek ondalık için sayı yap
+    pos_cols = ["Fiyat konumu", "İndirimli fiyat konumu", "Spec adjusted fiyat konumu"]
+    for c in pos_cols:
+        if c in df.columns:
+            # Önce doğrudan, olmazsa locale varyasyonları için to_numeric_safe
+            converted = pd.to_numeric(df[c], errors="coerce")
+            if converted.isna().all():
+                converted = to_numeric_safe(df[c].astype(str))
+            df[c] = converted
     return df
 
 df_group_fmt = fmt_numeric(df_group[display_cols].copy())
@@ -127,6 +146,10 @@ styled = df_group_fmt.style.apply(highlight_selected, axis=1).format(
     {
         "Stoktaki en uygun otomobil fiyatı": "{:,.0f}",
         "İndirimli fiyat": "{:,.0f}",
+        "Fiyat konumu": "{:.1f}",
+        "İndirimli fiyat konumu": "{:.1f}",
+        "Spec adjusted fiyat konumu": "{:.1f}",
+        # "İndirim oranı": "{:.1f}%"  # İstersen bunu aktifleştiririz (değerler 0-100 ise güzel durur)
     }
 )
 st.dataframe(styled, use_container_width=True, hide_index=True)
@@ -135,5 +158,6 @@ with st.expander("Açıklama / Notlar"):
     st.markdown(
         "- Veri blokları D sütunundaki boş satırlar ile ayrılmıştır.\n"
         "- Filtreler yalnızca D sütununda **BMW** olan satırlardan türetilmiştir (Model=E, Paket=F).\n"
-        "- Fiyat kolonları sayıya çevrilerek binlik ayırıcı ile formatlanır."
+        "- Fiyatlar binlik ayraçla, *konum* sütunları tek ondalık basamakla gösterilir.\n"
+        "- **İndirim oranı** hücreleri içeriği neyse aynen gösterilir (%, nokta/virgül vb.)."
     )
