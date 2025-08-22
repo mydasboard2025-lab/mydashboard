@@ -85,6 +85,8 @@ def load_data(path: Path) -> pd.DataFrame:
         skiprows=3,   # veri 4. satırdan başlıyor
         header=None,
         engine="openpyxl",
+        decimal=",", thousands="."
+
     )
     df.columns = [
         "Marka",           # D
@@ -99,11 +101,14 @@ def load_data(path: Path) -> pd.DataFrame:
         "İndirimli fiyat konumu",            # P
         "Spec adjusted fiyat konumu",        # Q
     ]
+    # Boşlukla dolu hücreleri gerçek NaN'a çevir (grup ayrımı sağlıklı olsun)
+    df["Marka"] = df["Marka"].replace(r"^\s*$", pd.NA, regex=True)
+
     # Blok/grup: D sütunundaki boş satır her yeni grubu başlatır
     df["__group_id__"] = df["Marka"].isna().cumsum()
 
     # J sütunu: yüzdeleri 0-1'e çevir
-    df["İndirim oranı"] = parse_percent_series(df["İndirim oranı"])
+    # df["İndirim oranı"] = parse_percent_series(df["İndirim oranı"])
 
     return df
 
@@ -116,6 +121,26 @@ if EXCEL_PATH is None or not EXCEL_PATH.exists():
 
 df_raw = load_data(EXCEL_PATH)
 
+with st.expander("Teşhis Paneli (ham okuma vs. parse)"):
+    # Aynı aralığı sadece 'string' olarak tekrar oku (İLK 30 satır)
+    df_debug = pd.read_excel(
+        EXCEL_PATH, sheet_name=0, usecols="D:Q", skiprows=3, header=None,
+        nrows=30, dtype=str, engine="openpyxl"
+    )
+    df_debug.columns = [
+        "Marka","Model","Paket","_G",
+        "H_raw","I_raw","J_raw","_K","_L","_M","_N",
+        "O_raw","P_raw","Q_raw"
+    ]
+    st.write("İlk 30 satır (ham, metin olarak):")
+    st.dataframe(df_debug[["Marka","Model","Paket","H_raw","I_raw","J_raw","O_raw","P_raw","Q_raw"]], use_container_width=True, hide_index=True)
+
+    st.write("İlk 30 satır (parse edilmiş, app'te kullandığın df_raw):")
+    st.dataframe(
+        df_raw.loc[:29, ["Marka","Model","Paket","Stoktaki en uygun otomobil fiyatı","Fiyat konumu","İndirim oranı","İndirimli fiyat","İndirimli fiyat konumu","Spec adjusted fiyat konumu"]],
+        use_container_width=True, hide_index=True
+    )
+    
 # Görseli göster
 if IMAGE_PATH.exists():
     st.image(str(IMAGE_PATH), caption="Fiyat Konumu (kurumsal format)")
