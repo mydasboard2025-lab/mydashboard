@@ -8,7 +8,46 @@ st.set_page_config(page_title="Fiyat Karşılaştırması Dashboard", layout="wi
 EXCEL_PATH = Path("data") / "Fiyat Karşılaştırması - 08.08.2025.xlsx"
 IMAGE_PATH = Path("assets") / "Fiyat Konumu tablo.png"
 
-# ---- Yardımcı: Veri Yükleme ----
+# ---- Yardımcılar ----
+def parse_percent_series(s: pd.Series) -> pd.Series:
+    """
+    Farklı yazımları (12,5%, 12.5%, 12,5, 0.125 vb.) güvenli biçimde
+    0-1 aralığındaki yüzde değerine dönüştürür.
+    """
+    # Eğer seri zaten sayısal ise
+    if pd.api.types.is_numeric_dtype(s):
+        # Eğer çoğu değer 1'den büyükse yüzdelik (örn. 12.5 => %12.5) kabul edip /100 yap
+        # değilse (örn. 0.125) doğrudan bırak
+        ser = s.astype(float)
+        if ser.notna().sum() > 0:
+            ratio_over1 = (ser.dropna() > 1).mean()
+            if ratio_over1 > 0.5:
+                ser = ser / 100.0
+        return ser
+
+    # Nesne/string ise: % işaretini ve boşlukları temizle, , -> . çevir
+    txt = (
+        s.astype(str)
+         .str.strip()
+         .str.replace("%", "", regex=False)
+         .str.replace("\u200f", "", regex=False)  # olası RTL gizli karakter
+         .str.replace("\u200e", "", regex=False)  # LTR gizli karakter
+    )
+    # ',' ondalık ayırıcısını '.' yap
+    txt = txt.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+    # Not: Yukarıdaki iki adım "1.234,5" gibi binlik+ondalık vakalarını 12345.0'a çevirebilir.
+    # Yüzdelerde genelde binlik kullanılmadığı varsayımıyla ilerliyoruz.
+    ser = pd.to_numeric(txt, errors="coerce")
+
+    if ser.notna().sum() == 0:
+        return ser  # hepsi NaN ise bırak
+
+    # Çoğu değer 1'den büyükse yüzdelik sayı kabul edip /100
+    ratio_over1 = (ser.dropna() > 1).mean()
+    if ratio_over1 > 0.5:
+        ser = ser / 100.0
+    return ser
+
 @st.cache_data(show_spinner=False)
 def load_data(path: Path) -> pd.DataFrame:
     df = pd.read_excel(
@@ -34,6 +73,10 @@ def load_data(path: Path) -> pd.DataFrame:
     ]
     # Blok/grup: D (Marka) boş satırları blok ayırıcısı
     df["__group_id__"] = df["Marka"].isna().cumsum()
+
+    # J sütununu (İndirim oranı) güvenli yüzdeye çevir (0-1)
+    df["İndirim oranı"] = parse_percent_series(df["İndirim oranı"])
+
     return df
 
 # ---- Yükle ----
@@ -93,14 +136,14 @@ if df_selected_bmw.empty:
 group_id = int(df_selected_bmw["__group_id__"].iloc[0])
 df_group = df_raw[(df_raw["__group_id__"] == group_id) & (df_raw["Marka"].notna())].copy()
 
-# Gösterilecek kolonlar (İndirim oranı eklendi)
+# Gösterilecek kolonlar
 display_cols = [
     "Marka",
     "Model",
     "Paket",
     "Stoktaki en uygun otomobil fiyatı",
     "Fiyat konumu",
-    "İndirim oranı",                # <--- eklendi
+    "İndirim oranı",                # (0-1 float)
     "İndirimli fiyat",
     "İndirimli fiyat konumu",
     "Spec adjusted fiyat konumu",
@@ -116,7 +159,6 @@ def highlight_selected(row):
 
 # Numerik format: fiyatlar ve konumlar
 def to_numeric_safe(s):
-    # Nokta/virgül farklarını güvenli çevirmek için
     if s.dtype == "object":
         return pd.to_numeric(s.str.replace(".", "", regex=False).str.replace(",", ".", regex=False), errors="coerce")
     return pd.to_numeric(s, errors="coerce")
@@ -132,11 +174,12 @@ def fmt_numeric(df):
     pos_cols = ["Fiyat konumu", "İndirimli fiyat konumu", "Spec adjusted fiyat konumu"]
     for c in pos_cols:
         if c in df.columns:
-            # Önce doğrudan, olmazsa locale varyasyonları için to_numeric_safe
             converted = pd.to_numeric(df[c], errors="coerce")
             if converted.isna().all():
                 converted = to_numeric_safe(df[c].astype(str))
             df[c] = converted
+
+    # İndirim oranı zaten 0-1'e çevrildi (parse_percent_series), burada dokunmuyoruz
     return df
 
 df_group_fmt = fmt_numeric(df_group[display_cols].copy())
@@ -149,7 +192,7 @@ styled = df_group_fmt.style.apply(highlight_selected, axis=1).format(
         "Fiyat konumu": "{:.1f}",
         "İndirimli fiyat konumu": "{:.1f}",
         "Spec adjusted fiyat konumu": "{:.1f}",
-        # "İndirim oranı": "{:.1f}%"  # İstersen bunu aktifleştiririz (değerler 0-100 ise güzel durur)
+        "İndirim oranı": "{:.1%}",  # tek ondalık yüzde
     }
 )
 st.dataframe(styled, use_container_width=True, hide_index=True)
@@ -159,5 +202,5 @@ with st.expander("Açıklama / Notlar"):
         "- Veri blokları D sütunundaki boş satırlar ile ayrılmıştır.\n"
         "- Filtreler yalnızca D sütununda **BMW** olan satırlardan türetilmiştir (Model=E, Paket=F).\n"
         "- Fiyatlar binlik ayraçla, *konum* sütunları tek ondalık basamakla gösterilir.\n"
-        "- **İndirim oranı** hücreleri içeriği neyse aynen gösterilir (%, nokta/virgül vb.)."
+        "- **İndirim oranı** Excel’deki yazıma bakılmaksızın güvenle çözümlenip yüzde olarak (tek ondalık) gösterilir."
     )
