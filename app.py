@@ -9,29 +9,12 @@ import zoneinfo
 st.set_page_config(page_title="Fiyat Karşılaştırması Dashboard", layout="wide")
 DATA_DIR = Path("data")
 
-# Dosya isimleri: (GitHub'da bunları kullanacağız)
+# Dosya isimleri
 PRICE_FILE_NAME = "Fiyat Karşılaştırması_v4.xlsx"      # Rakip karşılaştırma
 PERF_FILE_NAME  = "Model aylık performans.xlsx"        # Retail/Handover/Presold/Free
 
 # ================== Yardımcı Fonksiyonlar ==================
-def find_price_excel(data_dir: Path) -> Path | None:
-    """
-    1) Önce sabit isim: Fiyat Karşılaştırması_v4.xlsx
-    2) Yoksa data/ içindeki .xlsx'ler arasından 'fiyat' içerenleri öne al, mtime DESC.
-    """
-    if not data_dir.exists():
-        return None
-    exact = data_dir / PRICE_FILE_NAME
-    if exact.exists():
-        return exact
-    files = list(data_dir.glob("*.xlsx"))
-    if not files:
-        return None
-    files.sort(key=lambda p: ("fiyat" not in p.name.lower(), -p.stat().st_mtime, p.name.lower()))
-    return files[0]
-
 def to_numeric_locale_aware(s: pd.Series) -> pd.Series:
-    """Virgül ondalık, nokta binlik, para/metin temizliği ile güvenli numeric çeviri."""
     t = s.astype(str).str.strip()
     t = t.replace({
         "": pd.NA, "-": pd.NA, "—": pd.NA, "–": pd.NA,
@@ -67,14 +50,20 @@ def fmt_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ================== Rakip Karşılaştırma (Önceki Kurgu) ==================
+def find_price_excel(data_dir: Path) -> Path | None:
+    if not data_dir.exists():
+        return None
+    exact = data_dir / PRICE_FILE_NAME
+    if exact.exists():
+        return exact
+    files = list(data_dir.glob("*.xlsx"))
+    if not files:
+        return None
+    files.sort(key=lambda p: ("fiyat" not in p.name.lower(), -p.stat().st_mtime, p.name.lower()))
+    return files[0]
+
 @st.cache_data(show_spinner=False)
 def load_price_compare(path: Path) -> pd.DataFrame:
-    """
-    Excel şablonu:
-      - Her zaman ilk sheet
-      - D:Q kolonları
-      - 4. satırdan itibaren (skiprows=3)
-    """
     df = pd.read_excel(
         path,
         sheet_name=0,
@@ -84,38 +73,30 @@ def load_price_compare(path: Path) -> pd.DataFrame:
         engine="openpyxl",
     )
     df.columns = [
-        "Marka",           # D
-        "Model",           # E
-        "Paket",           # F
-        "_G",              # G (kullanılmıyor)
+        "Marka", "Model", "Paket", "_G",
         "Stoktaki en uygun otomobil fiyatı",  # H
-        "Fiyat konumu",    # I
-        "İndirim oranı",   # J
-        "_K", "_L", "_M", "_N",              # K..N
-        "İndirimli fiyat",                   # O
-        "İndirimli fiyat konumu",            # P
-        "Spec adjusted fiyat konumu",        # Q
+        "Fiyat konumu",                       # I
+        "İndirim oranı",                      # J
+        "_K", "_L", "_M", "_N",
+        "İndirimli fiyat",                    # O
+        "İndirimli fiyat konumu",             # P
+        "Spec adjusted fiyat konumu",         # Q
     ]
-
-    # Grup ayraçları: D boşsa ayraç satırı
     df["Marka"] = df["Marka"].replace(r"^\s*$", pd.NA, regex=True)
     df["__group_id__"] = df["Marka"].isna().cumsum()
 
-    # H filtresi (NaN/0'ları at)
     h_col = "Stoktaki en uygun otomobil fiyatı"
     h_num = to_numeric_locale_aware(df[h_col])
     is_na = df[h_col].isna() | h_num.isna()
     is_zero = h_num.fillna(0).eq(0)
     df = df[~(is_na | is_zero)].copy()
 
-    # Yüzde normalize (0-1)
     df["İndirim oranı"] = parse_percent_series_mixed(df["İndirim oranı"])
     return df
 
 def build_price_compare_ui(df_raw: pd.DataFrame, source_path: Path):
     st.markdown("## BMW Rakip Karşılaştırma")
 
-    # Sadece BMW satırları (Model/Paket dolu)
     df_bmw = df_raw[(df_raw["Marka"].astype(str).str.strip().str.upper() == "BMW")]
     df_bmw = df_bmw[df_bmw["Model"].notna() & df_bmw["Paket"].notna()]
 
@@ -134,7 +115,6 @@ def build_price_compare_ui(df_raw: pd.DataFrame, source_path: Path):
             return
         selected_pkg = st.selectbox("Paket", options=pkg_list, index=0, key="bmw_pkg")
 
-    # Seçilen satır → grup → rakipler
     df_sel = df_bmw[(df_bmw["Model"].astype(str) == selected_model) & (df_bmw["Paket"].astype(str) == selected_pkg)]
     if df_sel.empty:
         st.info("Seçime uygun satır bulunamadı.")
@@ -144,9 +124,7 @@ def build_price_compare_ui(df_raw: pd.DataFrame, source_path: Path):
     df_group = df_raw[(df_raw["__group_id__"] == group_id) & (df_raw["Marka"].notna())].copy()
 
     display_cols = [
-        "Marka",
-        "Model",
-        "Paket",
+        "Marka", "Model", "Paket",
         "Stoktaki en uygun otomobil fiyatı",
         "Fiyat konumu",
         "İndirim oranı",
@@ -180,11 +158,6 @@ def build_price_compare_ui(df_raw: pd.DataFrame, source_path: Path):
 REQUIRED_SHEETS = {"Retail", "Handover Model", "Presold"}
 
 def find_performance_workbook(data_dir: Path) -> Path | None:
-    """
-    1) Önce sabit isim: Model aylık performans.xlsx
-    2) Yoksa data/ içindeki .xlsx'lerde REQUIRED_SHEETS olan ilk dosya
-       (isimde 'model'/'performans' geçenlere öncelik)
-    """
     if not data_dir.exists():
         return None
     exact = data_dir / PERF_FILE_NAME
@@ -249,24 +222,21 @@ def load_model_lists(perf_path: Path) -> list[str]:
     return sorted(models)
 
 @st.cache_data(show_spinner=False)
-def get_retail_handover_metrics(perf_path: Path, model_name: str, month_abbr: str) -> dict:
-    out = {"retail_total": None, "retail_month": None, "handover_total": None, "handover_month": None}
-    for sh, key_total, key_month in [
-        ("Retail", "retail_total", "retail_month"),
-        ("Handover Model", "handover_total", "handover_month"),
+def get_retail_handover_month_only(perf_path: Path, model_name: str, month_abbr: str) -> dict:
+    """
+    Sadece içinde bulunduğumuz ay değerlerini döner:
+      - Retail (month)
+      - Handover (month)
+    """
+    out = {"retail_month": None, "handover_month": None}
+    for sh, key_month in [
+        ("Retail", "retail_month"),
+        ("Handover Model", "handover_month"),
     ]:
         df = _read_sheet(perf_path, sh)
         r_idx = _row_index_for_model(df, model_name, model_col_idx=3)
         if r_idx is None:
             continue
-
-        # Toplam T sütunu (0-based 19)
-        try:
-            tot_val = _to_num(df.iat[r_idx, 19])
-        except Exception:
-            tot_val = None
-
-        # Ay kolonu (6. satır başlıkları; F'den itibaren)
         m_col = _month_col_index_by_abbr(df, month_abbr, start_col=5, header_idx=5)
         m_val = None
         if m_col is not None:
@@ -274,8 +244,6 @@ def get_retail_handover_metrics(perf_path: Path, model_name: str, month_abbr: st
                 m_val = _to_num(df.iat[r_idx, m_col])
             except Exception:
                 m_val = None
-
-        out[key_total] = tot_val
         out[key_month] = m_val
     return out
 
@@ -299,8 +267,35 @@ def get_presold_free(perf_path: Path, model_name: str) -> dict:
 def build_monthly_performance_ui(perf_path: Path):
     with st.expander("📊 Model Aylık Performans (Retail / Handover / Presold / Free)", expanded=True):
         if perf_path is None:
-            st.warning("Aylık performans dosyası bulunamadı. Lütfen 'Model aylık performans.xlsx' dosyasını (veya bu sayfaları içeren bir Excel’i) `data/` klasörüne koy.")
+            st.warning("Aylık performans dosyası bulunamadı. Lütfen 'Model aylık performans.xlsx' dosyasını `data/` klasörüne koy.")
             return
+
+        # ---- CSS: Açık mavi kutular ----
+        st.markdown("""
+        <style>
+        .kv-row {display:flex; gap:12px; flex-wrap:wrap;}
+        .kv-box {
+            flex:1 1 0;
+            background:#eaf3ff;                 /* açık mavi */
+            border:1px solid #d6e7ff;
+            border-radius:12px;
+            padding:14px 16px;
+            min-width:180px;
+            text-align:center;
+        }
+        .kv-title {
+            font-size:12px;
+            color:#2a4a7a;
+            letter-spacing:.3px;
+            text-transform:uppercase;
+            margin-bottom:6px;
+        }
+        .kv-value {
+            font-size:22px;
+            font-weight:700;
+        }
+        </style>
+        """, unsafe_allow_html=True)
 
         # Kullanıcı TZ: Europe/Istanbul, ay başlığı İngilizce kısaltma ('Oct' gibi)
         ist_tz = zoneinfo.ZoneInfo("Europe/Istanbul")
@@ -318,21 +313,36 @@ def build_monthly_performance_ui(perf_path: Path):
             key="perf_model_select"
         )
 
-        rh = get_retail_handover_metrics(perf_path, selected_perf_model, month_abbr)
+        rh = get_retail_handover_month_only(perf_path, selected_perf_model, month_abbr)
         pf = get_presold_free(perf_path, selected_perf_model)
 
-        c1, c2, c3, c4 = st.columns(4)
-        def _fmt(v):
+        def _fmt(v): 
             return "—" if v is None or pd.isna(v) else f"{float(v):,.0f}"
 
-        c1.metric("Retail (Total)", _fmt(rh.get("retail_total")))
-        c2.metric(f"Retail ({month_abbr})", _fmt(rh.get("retail_month")))
-        c3.metric("Handover (Total)", _fmt(rh.get("handover_total")))
-        c4.metric(f"Handover ({month_abbr})", _fmt(rh.get("handover_month")))
-
-        c5, c6 = st.columns(2)
-        c5.metric("Presold", _fmt(pf.get("presold")))
-        c6.metric("Free", _fmt(pf.get("free")))
+        # ---- 4 kutu tek satır ----
+        st.markdown(
+            f"""
+            <div class="kv-row">
+              <div class="kv-box">
+                <div class="kv-title">Retail ({month_abbr})</div>
+                <div class="kv-value">{_fmt(rh.get("retail_month"))}</div>
+              </div>
+              <div class="kv-box">
+                <div class="kv-title">Handover ({month_abbr})</div>
+                <div class="kv-value">{_fmt(rh.get("handover_month"))}</div>
+              </div>
+              <div class="kv-box">
+                <div class="kv-title">Presold</div>
+                <div class="kv-value">{_fmt(pf.get("presold"))}</div>
+              </div>
+              <div class="kv-box">
+                <div class="kv-title">Free</div>
+                <div class="kv-value">{_fmt(pf.get("free"))}</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
         st.caption(f"Kaynak: {perf_path.name}  •  Ay: {month_abbr}")
 
@@ -349,7 +359,7 @@ def main():
 
     st.markdown("---")
 
-    # 2) Aylık Performans Kutucukları
+    # 2) Aylık Performans Kutucukları (sadece aylık değerler)
     perf_excel = find_performance_workbook(DATA_DIR)
     build_monthly_performance_ui(perf_excel)
 
