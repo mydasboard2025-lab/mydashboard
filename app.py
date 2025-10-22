@@ -2,19 +2,31 @@ import streamlit as st
 import pandas as pd
 import re
 from pathlib import Path
+from datetime import datetime
+import zoneinfo
 
+# ================== Genel Ayarlar ==================
 st.set_page_config(page_title="Fiyat Karşılaştırması Dashboard", layout="wide")
-
 DATA_DIR = Path("data")
 
-# ---------- Helpers ----------
-def find_latest_excel(data_dir: Path) -> Path | None:
+# Dosya isimleri: (GitHub'da bunları kullanacağız)
+PRICE_FILE_NAME = "Fiyat Karşılaştırması_v4.xlsx"      # Rakip karşılaştırma
+PERF_FILE_NAME  = "Model aylık performans.xlsx"        # Retail/Handover/Presold/Free
+
+# ================== Yardımcı Fonksiyonlar ==================
+def find_price_excel(data_dir: Path) -> Path | None:
+    """
+    1) Önce sabit isim: Fiyat Karşılaştırması_v4.xlsx
+    2) Yoksa data/ içindeki .xlsx'ler arasından 'fiyat' içerenleri öne al, mtime DESC.
+    """
     if not data_dir.exists():
         return None
+    exact = data_dir / PRICE_FILE_NAME
+    if exact.exists():
+        return exact
     files = list(data_dir.glob("*.xlsx"))
     if not files:
         return None
-    # 'fiyat' geçenleri öne al, sonra mtime DESC, sonra ada göre
     files.sort(key=lambda p: ("fiyat" not in p.name.lower(), -p.stat().st_mtime, p.name.lower()))
     return files[0]
 
@@ -42,9 +54,27 @@ def parse_percent_series_mixed(s: pd.Series) -> pd.Series:
         ser = ser / 100.0
     return ser
 
+def fmt_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    for c in ["Stoktaki en uygun otomobil fiyatı", "İndirimli fiyat"]:
+        if c in df.columns:
+            df[c] = to_numeric_locale_aware(df[c])
+    for c in ["Fiyat konumu", "İndirimli fiyat konumu", "Spec adjusted fiyat konumu"]:
+        if c in df.columns:
+            conv = pd.to_numeric(df[c], errors="coerce")
+            if conv.isna().all():
+                conv = to_numeric_locale_aware(df[c])
+            df[c] = conv
+    return df
+
+# ================== Rakip Karşılaştırma (Önceki Kurgu) ==================
 @st.cache_data(show_spinner=False)
-def load_data_auto(path: Path) -> pd.DataFrame:
-    # Her zaman ilk sheet + 4. satırdan (skiprows=3) D:Q aralığı
+def load_price_compare(path: Path) -> pd.DataFrame:
+    """
+    Excel şablonu:
+      - Her zaman ilk sheet
+      - D:Q kolonları
+      - 4. satırdan itibaren (skiprows=3)
+    """
     df = pd.read_excel(
         path,
         sheet_name=0,
@@ -67,105 +97,261 @@ def load_data_auto(path: Path) -> pd.DataFrame:
         "Spec adjusted fiyat konumu",        # Q
     ]
 
-    # --- 1) Önce grup sınırlarını oluştur (D sütunu boş satır = ayraç) ---
+    # Grup ayraçları: D boşsa ayraç satırı
     df["Marka"] = df["Marka"].replace(r"^\s*$", pd.NA, regex=True)
-    df["__group_id__"] = df["Marka"].isna().cumsum()   # <-- AYRAÇLAR KORUNDU
+    df["__group_id__"] = df["Marka"].isna().cumsum()
 
-    # --- 2) Şimdi H filtresini uygula; grup_id korunur ---
+    # H filtresi (NaN/0'ları at)
     h_col = "Stoktaki en uygun otomobil fiyatı"
     h_num = to_numeric_locale_aware(df[h_col])
-
-    # Excel #N/A genelde NaN olur; ayrıca numerik NaN'lar da düşsün
     is_na = df[h_col].isna() | h_num.isna()
-    # 0 olanlar düşsün
     is_zero = h_num.fillna(0).eq(0)
-
     df = df[~(is_na | is_zero)].copy()
 
-    # Ayraç (Marka boş) satırları zaten göstermiyoruz
-    # Ama grup kimliği korunmuş durumda
-
-    # Yüzde sütunu normalize (0-1)
+    # Yüzde normalize (0-1)
     df["İndirim oranı"] = parse_percent_series_mixed(df["İndirim oranı"])
-
     return df
 
-def fmt_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    for c in ["Stoktaki en uygun otomobil fiyatı", "İndirimli fiyat"]:
-        if c in df.columns:
-            df[c] = to_numeric_locale_aware(df[c])
-    for c in ["Fiyat konumu", "İndirimli fiyat konumu", "Spec adjusted fiyat konumu"]:
-        if c in df.columns:
-            conv = pd.to_numeric(df[c], errors="coerce")
-            if conv.isna().all():
-                conv = to_numeric_locale_aware(df[c])
-            df[c] = conv
-    return df
+def build_price_compare_ui(df_raw: pd.DataFrame, source_path: Path):
+    st.markdown("## BMW Rakip Karşılaştırma")
 
-# ---------- Flow ----------
-EXCEL_PATH = find_latest_excel(DATA_DIR)
-if EXCEL_PATH is None or not EXCEL_PATH.exists():
-    st.error("`data/` klasöründe .xlsx bulunamadı. Lütfen Excel dosyanı `data/` içine yükle.")
-    st.stop()
+    # Sadece BMW satırları (Model/Paket dolu)
+    df_bmw = df_raw[(df_raw["Marka"].astype(str).str.strip().str.upper() == "BMW")]
+    df_bmw = df_bmw[df_bmw["Model"].notna() & df_bmw["Paket"].notna()]
 
-st.markdown("## BMW Rakip Karşılaştırma")
+    if df_bmw.empty:
+        st.warning("Excel içinde (H=0/#N/A filtreleri sonrası) BMW satırı bulunamadı.")
+        return
 
-df_raw = load_data_auto(EXCEL_PATH)
+    c1, c2, _ = st.columns([2, 2, 1])
+    with c1:
+        model_list = sorted(df_bmw["Model"].astype(str).unique().tolist())
+        selected_model = st.selectbox("BMW Model", options=model_list, index=0, key="bmw_model")
+    with c2:
+        pkg_list = sorted(df_bmw.loc[df_bmw["Model"].astype(str) == selected_model, "Paket"].astype(str).unique())
+        if len(pkg_list) == 0:
+            st.info("Seçilen model için paket bulunamadı.")
+            return
+        selected_pkg = st.selectbox("Paket", options=pkg_list, index=0, key="bmw_pkg")
 
-# Filtre kaynakları: sadece BMW
-df_bmw = df_raw[(df_raw["Marka"].astype(str).str.strip().str.upper() == "BMW")]
-df_bmw = df_bmw[df_bmw["Model"].notna() & df_bmw["Paket"].notna()]
+    # Seçilen satır → grup → rakipler
+    df_sel = df_bmw[(df_bmw["Model"].astype(str) == selected_model) & (df_bmw["Paket"].astype(str) == selected_pkg)]
+    if df_sel.empty:
+        st.info("Seçime uygun satır bulunamadı.")
+        return
 
-if df_bmw.empty:
-    st.warning("Excel içinde (H=0/#N/A filtreleri sonrası) BMW satırı bulunamadı.")
-    st.stop()
+    group_id = int(df_sel["__group_id__"].iloc[0])
+    df_group = df_raw[(df_raw["__group_id__"] == group_id) & (df_raw["Marka"].notna())].copy()
 
-c1, c2, _ = st.columns([2, 2, 1])
-with c1:
-    model_list = sorted(df_bmw["Model"].astype(str).unique().tolist())
-    selected_model = st.selectbox("BMW Model", options=model_list, index=0)
-with c2:
-    pkg_list = sorted(df_bmw.loc[df_bmw["Model"].astype(str) == selected_model, "Paket"].astype(str).unique())
-    selected_pkg = st.selectbox("Paket", options=pkg_list, index=0)
+    display_cols = [
+        "Marka",
+        "Model",
+        "Paket",
+        "Stoktaki en uygun otomobil fiyatı",
+        "Fiyat konumu",
+        "İndirim oranı",
+        "İndirimli fiyat",
+        "İndirimli fiyat konumu",
+        "Spec adjusted fiyat konumu",
+    ]
+    df_group_fmt = fmt_numeric(df_group[display_cols].copy())
 
-# Seçilen satır → grup → rakipler
-df_sel = df_bmw[(df_bmw["Model"].astype(str) == selected_model) & (df_bmw["Paket"].astype(str) == selected_pkg)]
-if df_sel.empty:
-    st.info("Seçime uygun satır bulunamadı.")
-    st.stop()
+    def highlight_selected(row):
+        if (str(row["Marka"]).strip().upper() == "BMW") and \
+           (str(row["Model"]) == selected_model) and \
+           (str(row["Paket"]) == selected_pkg):
+            return ["font-weight: bold;"] * len(row)
+        return [""] * len(row)
 
-group_id = int(df_sel["__group_id__"].iloc[0])
-df_group = df_raw[(df_raw["__group_id__"] == group_id) & (df_raw["Marka"].notna())].copy()
+    styled = df_group_fmt.style.apply(highlight_selected, axis=1).format(
+        {
+            "Stoktaki en uygun otomobil fiyatı": "{:,.0f}",
+            "İndirimli fiyat": "{:,.0f}",
+            "Fiyat konumu": "{:.1f}",
+            "İndirimli fiyat konumu": "{:.1f}",
+            "Spec adjusted fiyat konumu": "{:.1f}",
+            "İndirim oranı": "{:.1%}",
+        }
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.caption(f"Kaynak: {source_path.name}")
 
-display_cols = [
-    "Marka",
-    "Model",
-    "Paket",
-    "Stoktaki en uygun otomobil fiyatı",
-    "Fiyat konumu",
-    "İndirim oranı",
-    "İndirimli fiyat",
-    "İndirimli fiyat konumu",
-    "Spec adjusted fiyat konumu",
-]
+# ================== Aylık Performans (Retail/Handover/Presold/Free) ==================
+REQUIRED_SHEETS = {"Retail", "Handover Model", "Presold"}
 
-df_group_fmt = fmt_numeric(df_group[display_cols].copy())
+def find_performance_workbook(data_dir: Path) -> Path | None:
+    """
+    1) Önce sabit isim: Model aylık performans.xlsx
+    2) Yoksa data/ içindeki .xlsx'lerde REQUIRED_SHEETS olan ilk dosya
+       (isimde 'model'/'performans' geçenlere öncelik)
+    """
+    if not data_dir.exists():
+        return None
+    exact = data_dir / PERF_FILE_NAME
+    if exact.exists():
+        return exact
 
-def highlight_selected(row):
-    if (str(row["Marka"]).strip().upper() == "BMW") and \
-       (str(row["Model"]) == selected_model) and \
-       (str(row["Paket"]) == selected_pkg):
-        return ["font-weight: bold;"] * len(row)
-    return [""] * len(row)
+    files = list(data_dir.glob("*.xlsx"))
+    if not files:
+        return None
 
-styled = df_group_fmt.style.apply(highlight_selected, axis=1).format(
-    {
-        "Stoktaki en uygun otomobil fiyatı": "{:,.0f}",
-        "İndirimli fiyat": "{:,.0f}",
-        "Fiyat konumu": "{:.1f}",
-        "İndirimli fiyat konumu": "{:.1f}",
-        "Spec adjusted fiyat konumu": "{:.1f}",
-        "İndirim oranı": "{:.1%}",
-    }
-)
-st.dataframe(styled, use_container_width=True, hide_index=True)
+    def _priority(p: Path):
+        name = p.name.lower()
+        prio_name = 0 if ("model" in name or "performans" in name or "performance" in name) else 1
+        return (prio_name, -p.stat().st_mtime, name)
+
+    files.sort(key=_priority)
+    for f in files:
+        try:
+            xls = pd.ExcelFile(f, engine="openpyxl")
+            sheets = set(xls.sheet_names)
+            if REQUIRED_SHEETS.issubset(sheets):
+                return f
+        except Exception:
+            continue
+    return None
+
+def _read_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
+    return pd.read_excel(path, sheet_name=sheet_name, header=None, engine="openpyxl")
+
+def _header_row(df: pd.DataFrame, header_idx: int = 5) -> pd.Series:
+    return df.iloc[header_idx].copy()
+
+def _month_col_index_by_abbr(df: pd.DataFrame, month_abbr: str, start_col: int = 5, header_idx: int = 5) -> int | None:
+    hdr = _header_row(df, header_idx=header_idx)
+    target = month_abbr.strip().lower()
+    for j in range(start_col, df.shape[1]):
+        val = str(hdr.iloc[j]).strip().lower()
+        if not val:
+            continue
+        if val == target or target in val:  # 'Oct' veya 'October' eşleşsin
+            return j
+    return None
+
+def _row_index_for_model(df: pd.DataFrame, model_name: str, model_col_idx: int = 3) -> int | None:
+    s = df.iloc[:, model_col_idx].astype(str).str.strip()
+    mask = s.str.casefold() == model_name.strip().casefold()
+    idx = mask[mask].index
+    if len(idx):
+        return int(idx[0])
+    return None
+
+def _to_num(x):
+    return to_numeric_locale_aware(pd.Series([x])).iloc[0]
+
+@st.cache_data(show_spinner=False)
+def load_model_lists(perf_path: Path) -> list[str]:
+    models = set()
+    for sh in ["Retail", "Handover Model", "Presold"]:
+        df = _read_sheet(perf_path, sh)
+        col_d = df.iloc[:, 3].astype(str).str.strip()
+        models |= set(col_d[col_d.ne("")])
+    return sorted(models)
+
+@st.cache_data(show_spinner=False)
+def get_retail_handover_metrics(perf_path: Path, model_name: str, month_abbr: str) -> dict:
+    out = {"retail_total": None, "retail_month": None, "handover_total": None, "handover_month": None}
+    for sh, key_total, key_month in [
+        ("Retail", "retail_total", "retail_month"),
+        ("Handover Model", "handover_total", "handover_month"),
+    ]:
+        df = _read_sheet(perf_path, sh)
+        r_idx = _row_index_for_model(df, model_name, model_col_idx=3)
+        if r_idx is None:
+            continue
+
+        # Toplam T sütunu (0-based 19)
+        try:
+            tot_val = _to_num(df.iat[r_idx, 19])
+        except Exception:
+            tot_val = None
+
+        # Ay kolonu (6. satır başlıkları; F'den itibaren)
+        m_col = _month_col_index_by_abbr(df, month_abbr, start_col=5, header_idx=5)
+        m_val = None
+        if m_col is not None:
+            try:
+                m_val = _to_num(df.iat[r_idx, m_col])
+            except Exception:
+                m_val = None
+
+        out[key_total] = tot_val
+        out[key_month] = m_val
+    return out
+
+@st.cache_data(show_spinner=False)
+def get_presold_free(perf_path: Path, model_name: str) -> dict:
+    res = {"presold": None, "free": None}
+    df = _read_sheet(perf_path, "Presold")
+    r_idx = _row_index_for_model(df, model_name, model_col_idx=3)
+    if r_idx is None:
+        return res
+    try:
+        res["presold"] = _to_num(df.iat[r_idx, 28])  # AC
+    except Exception:
+        res["presold"] = None
+    try:
+        res["free"] = _to_num(df.iat[r_idx, 30])     # AE
+    except Exception:
+        res["free"] = None
+    return res
+
+def build_monthly_performance_ui(perf_path: Path):
+    with st.expander("📊 Model Aylık Performans (Retail / Handover / Presold / Free)", expanded=True):
+        if perf_path is None:
+            st.warning("Aylık performans dosyası bulunamadı. Lütfen 'Model aylık performans.xlsx' dosyasını (veya bu sayfaları içeren bir Excel’i) `data/` klasörüne koy.")
+            return
+
+        # Kullanıcı TZ: Europe/Istanbul, ay başlığı İngilizce kısaltma ('Oct' gibi)
+        ist_tz = zoneinfo.ZoneInfo("Europe/Istanbul")
+        month_abbr = datetime.now(ist_tz).strftime("%b")  # 'Oct', 'Nov', ...
+
+        model_options = load_model_lists(perf_path)
+        if not model_options:
+            st.info("Model listesi boş görünüyor (D sütunu boş olabilir).")
+            return
+
+        selected_perf_model = st.selectbox(
+            "Model seçiniz (Aylık performans)",
+            options=model_options,
+            index=0,
+            key="perf_model_select"
+        )
+
+        rh = get_retail_handover_metrics(perf_path, selected_perf_model, month_abbr)
+        pf = get_presold_free(perf_path, selected_perf_model)
+
+        c1, c2, c3, c4 = st.columns(4)
+        def _fmt(v):
+            return "—" if v is None or pd.isna(v) else f"{float(v):,.0f}"
+
+        c1.metric("Retail (Total)", _fmt(rh.get("retail_total")))
+        c2.metric(f"Retail ({month_abbr})", _fmt(rh.get("retail_month")))
+        c3.metric("Handover (Total)", _fmt(rh.get("handover_total")))
+        c4.metric(f"Handover ({month_abbr})", _fmt(rh.get("handover_month")))
+
+        c5, c6 = st.columns(2)
+        c5.metric("Presold", _fmt(pf.get("presold")))
+        c6.metric("Free", _fmt(pf.get("free")))
+
+        st.caption(f"Kaynak: {perf_path.name}  •  Ay: {month_abbr}")
+
+# ================== Uygulama Akışı ==================
+def main():
+    # 1) Rakip Karşılaştırma
+    price_excel = find_price_excel(DATA_DIR)
+    if price_excel is None or not price_excel.exists():
+        st.error("`data/` klasöründe fiyat karşılaştırma için bir .xlsx bulunamadı. "
+                 f"Öncelik: `{PRICE_FILE_NAME}`.")
+    else:
+        df_raw = load_price_compare(price_excel)
+        build_price_compare_ui(df_raw, price_excel)
+
+    st.markdown("---")
+
+    # 2) Aylık Performans Kutucukları
+    perf_excel = find_performance_workbook(DATA_DIR)
+    build_monthly_performance_ui(perf_excel)
+
+if __name__ == "__main__":
+    main()
