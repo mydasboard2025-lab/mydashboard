@@ -271,9 +271,9 @@ def get_presold_free(perf_path: Path, model_name: str) -> dict:
 
 # ---------- YENİ: DIO Model (Günlük DIO grafiği) ----------
 @st.cache_data(show_spinner=False)
-def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO model") -> pd.DataFrame | None:
+def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO Model") -> pd.DataFrame | None:
     """
-    'DIO model' sayfasını header'sız okur.
+    'DIO Model' sayfasını header'sız okur.
     Tarih başlıkları 6. satır (index 5) E sütunundan (index 4) sağa doğru gider.
     Model adları D sütununda (D9'dan itibaren).
     """
@@ -311,20 +311,20 @@ def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp]
 
 def get_dio_timeseries(perf_path: Path, model_name: str):
     """
-    DIO model sayfasından seçilen model için:
+    DIO Model sayfasından seçilen model için:
       - X: tarih (E6'dan sağa, başlıklar bittiği yere kadar)
       - Y: ilgili satırdaki değerler (aynı sayıda hücre); boş/NaN/None -> 0, metin -> parse -> NaN -> 0
     """
-    df_dio = load_dio_sheet(perf_path, "DIO model")
+    df_dio = load_dio_sheet(perf_path, "DIO Model")
     if df_dio is None:
-        return None, "DIO model sayfası bulunamadı."
+        return None, "DIO Model sayfası bulunamadı."
     row_idx = _find_model_row_in_dio(df_dio, model_name)
     if row_idx is None:
-        return None, f"'{model_name}' modeli DIO model sayfasında bulunamadı."
+        return None, f"'{model_name}' modeli DIO Model sayfasında bulunamadı."
 
     dates, ncols = _extract_day_headers_dates(df_dio)
     if ncols == 0:
-        return None, "DIO model sayfasında E6'dan başlayan tarih başlıkları okunamadı."
+        return None, "DIO Model sayfasında E6'dan başlayan tarih başlıkları okunamadı."
 
     # E sütunu index 4; seçilen modelin satırından ncols kadar değer çek
     vals_raw = df_dio.iloc[row_idx, 4:4+ncols].tolist()
