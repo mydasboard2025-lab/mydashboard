@@ -211,13 +211,12 @@ def _month_col_index_by_abbr(df: pd.DataFrame, month_abbr: str, start_col: int =
             return j
     return None
 
-def _row_index_for_model(df: pd.DataFrame, model_name: str, model_col_idx: int = 3) -> int | None:
+# === YENİ: Tek indeks yerine birden çok indeks döndür ===
+def _row_indices_for_model(df: pd.DataFrame, model_name: str, model_col_idx: int = 3) -> list[int]:
     s = df.iloc[:, model_col_idx].astype(str).str.strip()
     mask = s.str.casefold() == model_name.strip().casefold()
-    idx = mask[mask].index
-    if len(idx):
-        return int(idx[0])
-    return None
+    idx_list = mask[mask].index.tolist()
+    return [int(i) for i in idx_list]
 
 def _to_num(x):
     return to_numeric_locale_aware(pd.Series([x])).iloc[0]
@@ -231,6 +230,7 @@ def load_model_lists(perf_path: Path) -> list[str]:
         models |= set(col_d[col_d.ne("")])
     return sorted(models)
 
+# === YENİ: Retail & Handover ay bazında TOPLAYARAK çek ===
 @st.cache_data(show_spinner=False)
 def get_retail_handover_month_only(perf_path: Path, model_name: str, month_abbr: str) -> dict:
     out = {"retail_month": None, "handover_month": None}
@@ -239,34 +239,45 @@ def get_retail_handover_month_only(perf_path: Path, model_name: str, month_abbr:
         ("Handover Model", "handover_month"),
     ]:
         df = _read_sheet(perf_path, sh)
-        r_idx = _row_index_for_model(df, model_name, model_col_idx=3)
-        if r_idx is None:
+        rows = _row_indices_for_model(df, model_name, model_col_idx=3)
+        if not rows:
             continue
         m_col = _month_col_index_by_abbr(df, month_abbr, start_col=5, header_idx=5)
-        m_val = None
-        if m_col is not None:
+        if m_col is None:
+            continue
+        vals = []
+        for r in rows:
             try:
-                m_val = _to_num(df.iat[r_idx, m_col])
+                vals.append(_to_num(df.iat[r, m_col]))
             except Exception:
-                m_val = None
-        out[key_month] = m_val
+                vals.append(pd.NA)
+        ser = pd.to_numeric(pd.Series(vals), errors="coerce")
+        total = float(ser.fillna(0).sum()) if ser.notna().any() else None
+        out[key_month] = total
     return out
 
+# === YENİ: Presold & Free kolonlarını TOPLAYARAK çek ===
 @st.cache_data(show_spinner=False)
 def get_presold_free(perf_path: Path, model_name: str) -> dict:
     res = {"presold": None, "free": None}
     df = _read_sheet(perf_path, "Presold")
-    r_idx = _row_index_for_model(df, model_name, model_col_idx=3)
-    if r_idx is None:
+    rows = _row_indices_for_model(df, model_name, model_col_idx=3)
+    if not rows:
         return res
-    try:
-        res["presold"] = _to_num(df.iat[r_idx, 28])  # AC
-    except Exception:
-        res["presold"] = None
-    try:
-        res["free"] = _to_num(df.iat[r_idx, 30])     # AE
-    except Exception:
-        res["free"] = None
+    pres, free = [], []
+    for r in rows:
+        try:
+            pres.append(_to_num(df.iat[r, 28]))  # AC
+        except Exception:
+            pres.append(pd.NA)
+        try:
+            free.append(_to_num(df.iat[r, 30]))  # AE
+        except Exception:
+            free.append(pd.NA)
+    pres_s = pd.to_numeric(pd.Series(pres), errors="coerce")
+    free_s = pd.to_numeric(pd.Series(free), errors="coerce")
+    res["presold"] = float(pres_s.fillna(0).sum()) if pres_s.notna().any() else None
+    res["free"]    = float(free_s.fillna(0).sum()) if free_s.notna().any() else None
     return res
 
 # ---------- DIO Model (Günlük DIO Model grafiği + toplam) ----------
@@ -278,11 +289,10 @@ def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO Model") -> pd.DataFra
     except Exception:
         return None
 
-def _find_model_row_in_dio(df_dio: pd.DataFrame, model_name: str) -> int | None:
+def _find_model_rows_in_dio(df_dio: pd.DataFrame, model_name: str) -> list[int]:
     col = df_dio.iloc[:, 3].astype(str).str.strip()  # D sütunu
     mask = (col.str.casefold() == model_name.strip().casefold())
-    idx = mask[mask].index
-    return int(idx[0]) if len(idx) else None
+    return [int(i) for i in mask[mask].index.tolist()]
 
 def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp], int]:
     """
@@ -305,32 +315,38 @@ def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp]
 def get_dio_timeseries_and_total(perf_path: Path, model_name: str):
     """
     Döner:
-      - df: TarihLabel (01.10), Tarih (datetime), Değer (float, boş->0)
-      - toplam: 6. satırdaki başlıklar bittiği ilk boş hücrenin aynı SÜTUNUNDA, ilgili model satırındaki değer
+      - df: TarihLabel (01.10), Tarih (datetime), Değer (float, boş->0)  -> (E sütunu ve devamı, aynı modele ait tüm satırların toplamı)
+      - toplam: 6. satırdaki başlıklar bittiği ilk boş hücrenin aynı SÜTUNUNDA, ilgili model satırlarının toplamı
     """
     df_dio = load_dio_sheet(perf_path, "DIO Model")
     if df_dio is None:
         return None, None, "DIO Model sayfası bulunamadı."
-    row_idx = _find_model_row_in_dio(df_dio, model_name)
-    if row_idx is None:
+    row_idxs = _find_model_rows_in_dio(df_dio, model_name)
+    if not row_idxs:
         return None, None, f"'{model_name}' modeli DIO Model sayfasında bulunamadı."
 
     dates, ncols = _extract_day_headers_dates(df_dio)
     if ncols == 0:
         return None, None, "DIO Model sayfasında E6'dan başlayan tarih başlıkları okunamadı."
 
-    # Günlük değerler: E sütunundan ncols kadar
-    vals_raw = df_dio.iloc[row_idx, 4:4+ncols].tolist()
-    vals_num = to_numeric_locale_aware(pd.Series(vals_raw)).fillna(0).astype(float)
+    # Günlük değerler: E sütunundan ncols kadar -> TÜM EŞLEŞEN SATIRLARIN TOPLAMI
+    daily_sum = np.zeros(ncols, dtype=float)
+    for r in row_idxs:
+        vals_raw = df_dio.iloc[r, 4:4+ncols].tolist()
+        vals_num = to_numeric_locale_aware(pd.Series(vals_raw)).fillna(0).astype(float).values
+        daily_sum += vals_num
 
-    out = pd.DataFrame({"Tarih": dates, "Değer": vals_num})
+    out = pd.DataFrame({"Tarih": dates, "Değer": daily_sum})
     out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
     out["TarihLabel"] = pd.Categorical(out["TarihLabel"], categories=out["TarihLabel"].tolist(), ordered=True)
 
-    # Toplam: 6. satırda günler bittiği ilk boş hücrenin sütunu = 4 + ncols
-    total_cell = df_dio.iat[row_idx, 4 + ncols] if (4 + ncols) < df_dio.shape[1] else None
-    toplam = to_numeric_locale_aware(pd.Series([total_cell])).iloc[0]
-    toplam = 0 if pd.isna(toplam) else float(toplam)
+    # Toplam: 6. satırda günler bittiği ilk boş hücrenin sütunu = 4 + ncols -> TÜM SATIRLARIN TOPLAMI
+    toplam_vals = []
+    for r in row_idxs:
+        total_cell = df_dio.iat[r, 4 + ncols] if (4 + ncols) < df_dio.shape[1] else None
+        toplam_vals.append(to_numeric_locale_aware(pd.Series([total_cell])).iloc[0])
+    toplam_series = pd.to_numeric(pd.Series(toplam_vals), errors="coerce")
+    toplam = float(toplam_series.fillna(0).sum())
 
     return out, toplam, None
 
@@ -406,7 +422,7 @@ def build_monthly_performance_ui(perf_path: Path):
                 import altair as alt
                 BAR_COLOR = "#2a4a7a"
 
-                # Başlıkta toplamı göster
+                # Başlıkta toplamı göster (toplam: aynı modeldeki tüm satırların toplamı)
                 baslik = f"{selected_perf_model} • Günlük DIO Model • Toplam: {dio_total:,.0f}".replace(",", ".")
 
                 base = alt.Chart(dio_df).encode(
