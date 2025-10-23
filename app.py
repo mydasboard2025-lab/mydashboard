@@ -419,13 +419,20 @@ def load_focus_segment_df(file_path: str, sheet_name: str = "Monthly Basis"):
     if sheet_name.lower() not in available_sheets:
         raise ValueError(f"'{sheet_name}' sayfası bulunamadı. Mevcut sayfalar: {xls.sheet_names}")
 
-    col_names = ["Marka","Model"] + MONTHS_EN + ["YTD"]
+    col_names = ["Marka","Model"] + MONTHS_EN + ["YTD"]  # 15 kolon
+
+    usecols_letters = (
+        ["D","E"] +
+        [chr(c) for c in range(ord("G"), ord("R")+1)] +  # G..R
+        ["S"]
+    )  # => ['D','E','G','H','I','J','K','L','M','N','O','P','Q','R','S']
+    
     df = pd.read_excel(
         xls,
         sheet_name=sheet_name,
         header=None,
-        skiprows=9,          # 10. satırdan itibaren veri
-        usecols="D:S",       # D..S
+        skiprows=9,                 # 10. satırdan veri
+        usecols=",".join(usecols_letters),  # <-- kritik düzeltme
     )
     df.columns = col_names
 
