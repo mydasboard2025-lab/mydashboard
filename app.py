@@ -57,87 +57,11 @@ def fmt_numeric(df: pd.DataFrame) -> pd.DataFrame:
                 conv = to_numeric_locale_aware(df[c])
             df[c] = conv
     return df
-def _find_series_for_model(perf_path: Path, model_name: str, sheet_name: str = "Series") -> str | None:
-    """
-    'Series' sayfasında model adını satır genelinde arar, bulunan satırın B sütunundaki seri adını döndürür.
-    B sütununda seri olduğu varsayımı ile çalışır.
-    """
-    try:
-        df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
-    except Exception:
-        return None
 
-    # Satırda herhangi bir hücre model adına eşitse o satırın B sütununu (index=1) al
-    model_cf = str(model_name).strip().casefold()
-    for i in range(df.shape[0]):
-        row_vals = df.iloc[i, :].astype(str).str.strip().str.casefold()
-        if (row_vals == model_cf).any():
-            val = df.iat[i, 1]  # B sütunu
-            return None if pd.isna(val) else str(val).strip()
-    return None
-
-
-def _get_showroom_kpis(perf_path: Path, series_name: str, sheet_name: str = "BMW Showroom Seri Bazlı"):
-    """
-    'BMW Showroom Seri Bazlı' sayfasında B sütununda seri adını bulur ve:
-      Walk-in:  K (bu ay), O (önceki ay)
-      Test:     L (bu ay), Q (önceki ay)
-    değerlerini döndürür.
-    """
-    try:
-        df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
-    except Exception:
-        return {"walk_cur": None, "walk_prev": None, "test_cur": None, "test_prev": None}
-
-    # Seri isimleri B7'den aşağı: yine de güvenli olmak için tüm B sütununu tara
-    colB = df.iloc[:, 1].astype(str).str.strip()
-    mask = colB.str.casefold() == str(series_name).strip().casefold()
-    idx = mask[mask].index.tolist()
-    if not idx:
-        return {"walk_cur": None, "walk_prev": None, "test_cur": None, "test_prev": None}
-
-    r = idx[0]
-    def _num(x):
-        return to_numeric_locale_aware(pd.Series([x])).iloc[0]
-
-    vals = {
-        "walk_cur": _num(df.iat[r, 10]) if 10 < df.shape[1] else pd.NA,  # K
-        "walk_prev": _num(df.iat[r, 14]) if 14 < df.shape[1] else pd.NA, # O
-        "test_cur": _num(df.iat[r, 11]) if 11 < df.shape[1] else pd.NA,  # L
-        "test_prev": _num(df.iat[r, 16]) if 16 < df.shape[1] else pd.NA, # Q
-    }
-
-    # NaN -> None
-    for k,v in list(vals.items()):
-        vals[k] = None if pd.isna(v) else float(v)
-    return vals
-
-
-def _format_kpi_box(title: str, cur: float | None, prev: float | None) -> str:
-    """
-    Walk-in/Test Sürüşü kutusu için HTML döndürür.
-    Renk: artış yeşil, azalış kırmızı. prev yoksa değişim gizlenir.
-    """
-    def fmt_int(x):
-        return "—" if x is None else f"{x:,.0f}".replace(",", ".")
-
-    delta_html = ""
-    if (cur is not None) and (prev is not None) and (prev != 0):
-        delta = (cur - prev) / prev
-        cls = "delta-pos" if delta >= 0 else "delta-neg"
-        sign = "+" if delta >= 0 else ""
-        delta_html = f'<div class="kv-delta {cls}">{sign}{delta:.0%}</div><div class="kv-sub">vs önceki ay ({fmt_int(prev)})</div>'
-    elif prev is not None:
-        # prev var ama oran hesaplanamıyorsa
-        delta_html = f'<div class="kv-sub">vs önceki ay ({fmt_int(prev)})</div>'
-
-    return f"""
-    <div class="kv-box">
-      <div class="kv-title">{title}</div>
-      <div class="kv-value">{fmt_int(cur)}</div>
-      {delta_html}
-    </div>
-    """
+def fmt_int(x):
+    if x is None or pd.isna(x):
+        return "—"
+    return f"{float(x):,.0f}".replace(",", ".")
 
 # ================== Rakip Karşılaştırma ==================
 def find_price_excel(data_dir: Path) -> Path | None:
@@ -244,8 +168,8 @@ def build_price_compare_ui(df_raw: pd.DataFrame, source_path: Path):
     st.dataframe(styled, use_container_width=True, hide_index=True)
     st.caption(f"Kaynak: {source_path.name}")
 
-# ================== Aylık Performans (Retail/Handover/Presold/Free + Günlük DIO Model) ==================
-REQUIRED_SHEETS = {"Retail", "Handover Model", "Presold", "DIO Model", "Monthly Basis"}
+# ================== Aylık Performans (Retail/Handover/Presold/Free + Günlük DIO Model + Walk-in/Test) ==================
+REQUIRED_SHEETS = {"Retail", "Handover Model", "Presold", "DIO Model", "Monthly Basis", "Series", "BMW Showroom Seri Bazlı"}
 
 def find_performance_workbook(data_dir: Path) -> Path | None:
     if not data_dir.exists():
@@ -272,7 +196,6 @@ def find_performance_workbook(data_dir: Path) -> Path | None:
                 return f
         except Exception:
             continue
-    # Eğer tüm required sheetler yoksa yine de ilk uygun dosyayı dön
     return files[0] if files else None
 
 def _read_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
@@ -292,7 +215,6 @@ def _month_col_index_by_abbr(df: pd.DataFrame, month_abbr: str, start_col: int =
             return j
     return None
 
-# === YENİ: Tek indeks yerine birden çok indeks döndür ===
 def _row_indices_for_model(df: pd.DataFrame, model_name: str, model_col_idx: int = 3) -> list[int]:
     s = df.iloc[:, model_col_idx].astype(str).str.strip()
     mask = s.str.casefold() == model_name.strip().casefold()
@@ -311,7 +233,6 @@ def load_model_lists(perf_path: Path) -> list[str]:
         models |= set(col_d[col_d.ne("")])
     return sorted(models)
 
-# === YENİ: Retail & Handover ay bazında TOPLAYARAK çek ===
 @st.cache_data(show_spinner=False)
 def get_retail_handover_month_only(perf_path: Path, model_name: str, month_abbr: str) -> dict:
     out = {"retail_month": None, "handover_month": None}
@@ -337,7 +258,6 @@ def get_retail_handover_month_only(perf_path: Path, model_name: str, month_abbr:
         out[key_month] = total
     return out
 
-# === YENİ: Presold & Free kolonlarını TOPLAYARAK çek ===
 @st.cache_data(show_spinner=False)
 def get_presold_free(perf_path: Path, model_name: str) -> dict:
     res = {"presold": None, "free": None}
@@ -361,7 +281,53 @@ def get_presold_free(perf_path: Path, model_name: str) -> dict:
     res["free"]    = float(free_s.fillna(0).sum()) if free_s.notna().any() else None
     return res
 
-# ---------- DIO Model (Günlük DIO Model grafiği + toplam) ----------
+# ---------- Series → BMW Showroom Seri Bazlı (Walk-in & Test Sürüşü) ----------
+def _find_series_for_model(perf_path: Path, model_name: str, sheet_name: str = "Series") -> str | None:
+    try:
+        df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
+    except Exception:
+        return None
+    model_cf = str(model_name).strip().casefold()
+    for i in range(df.shape[0]):
+        row_vals = df.iloc[i, :].astype(str).str.strip().str.casefold()
+        if (row_vals == model_cf).any():
+            val = df.iat[i, 1]  # B sütunu
+            return None if pd.isna(val) else str(val).strip()
+    return None
+
+def _get_showroom_kpis(perf_path: Path, series_name: str, sheet_name: str = "BMW Showroom Seri Bazlı"):
+    try:
+        df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
+    except Exception:
+        return {"walk_cur": None, "walk_prev": None, "test_cur": None, "test_prev": None}
+    colB = df.iloc[:, 1].astype(str).str.strip()
+    mask = colB.str.casefold() == str(series_name).strip().casefold()
+    idx = mask[mask].index.tolist()
+    if not idx:
+        return {"walk_cur": None, "walk_prev": None, "test_cur": None, "test_prev": None}
+    r = idx[0]
+    def _num(x): return to_numeric_locale_aware(pd.Series([x])).iloc[0]
+    vals = {
+        "walk_cur": _num(df.iat[r, 10]) if 10 < df.shape[1] else pd.NA,  # K
+        "walk_prev": _num(df.iat[r, 14]) if 14 < df.shape[1] else pd.NA, # O
+        "test_cur": _num(df.iat[r, 11]) if 11 < df.shape[1] else pd.NA,  # L
+        "test_prev": _num(df.iat[r, 16]) if 16 < df.shape[1] else pd.NA, # Q
+    }
+    for k,v in list(vals.items()):
+        vals[k] = None if pd.isna(v) else float(v)
+    return vals
+
+def _delta_html(cur: float | None, prev: float | None) -> str:
+    if (cur is not None) and (prev is not None) and (prev != 0):
+        delta = (cur - prev) / prev
+        cls = "delta-pos" if delta >= 0 else "delta-neg"
+        sign = "+" if delta >= 0 else ""
+        return f'<div class="kv-delta {cls}">{sign}{delta:.0%}</div><div class="kv-sub">vs önceki ay ({fmt_int(prev)})</div>'
+    elif prev is not None:
+        return f'<div class="kv-sub">vs önceki ay ({fmt_int(prev)})</div>'
+    return ""
+
+# ---------- DIO Model ----------
 @st.cache_data(show_spinner=False)
 def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO Model") -> pd.DataFrame | None:
     try:
@@ -376,93 +342,75 @@ def _find_model_rows_in_dio(df_dio: pd.DataFrame, model_name: str) -> list[int]:
     return [int(i) for i in mask[mask].index.tolist()]
 
 def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp], int]:
-    """
-    6. satır (index 5), E sütunundan (index 4) itibaren tarih başlıklarını oku.
-    İlk boş/bozulmuş hücrede dur ve kaç tarih olduğunu (ncols) döndür.
-    """
-    headers = df_dio.iloc[5, 4:].tolist()
+    headers = df_dio.iloc[5, 4:].tolist()  # E sütunu başlıklar
     dates: list[pd.Timestamp] = []
     ncols = 0
     for h in headers:
         if pd.isna(h) or str(h).strip() == "":
             break
         dt = pd.to_datetime(h, dayfirst=True, errors="coerce")
-        if pd.isna(dt):
-            break
-        dates.append(dt)
-        ncols += 1
+        if pd.isna(dt): break
+        dates.append(dt); ncols += 1
     return dates, ncols
 
 def get_dio_timeseries_and_total(perf_path: Path, model_name: str):
-    """
-    Döner:
-      - df: TarihLabel (01.10), Tarih (datetime), Değer (float, boş->0)  -> (E sütunu ve devamı, aynı modele ait tüm satırların toplamı)
-      - toplam: 6. satırdaki başlıklar bittiği ilk boş hücrenin aynı SÜTUNUNDA, ilgili model satırlarının toplamı
-    """
     df_dio = load_dio_sheet(perf_path, "DIO Model")
     if df_dio is None:
         return None, None, "DIO Model sayfası bulunamadı."
     row_idxs = _find_model_rows_in_dio(df_dio, model_name)
     if not row_idxs:
         return None, None, f"'{model_name}' modeli DIO Model sayfasında bulunamadı."
-
     dates, ncols = _extract_day_headers_dates(df_dio)
     if ncols == 0:
         return None, None, "DIO Model sayfasında E6'dan başlayan tarih başlıkları okunamadı."
-
-    # Günlük değerler: E sütunundan ncols kadar -> TÜM EŞLEŞEN SATIRLARIN TOPLAMI
     daily_sum = np.zeros(ncols, dtype=float)
     for r in row_idxs:
         vals_raw = df_dio.iloc[r, 4:4+ncols].tolist()
         vals_num = to_numeric_locale_aware(pd.Series(vals_raw)).fillna(0).astype(float).values
         daily_sum += vals_num
-
     out = pd.DataFrame({"Tarih": dates, "Değer": daily_sum})
     out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
     out["TarihLabel"] = pd.Categorical(out["TarihLabel"], categories=out["TarihLabel"].tolist(), ordered=True)
-
-    # Toplam: 6. satırda günler bittiği ilk boş hücrenin sütunu = 4 + ncols -> TÜM SATIRLARIN TOPLAMI
     toplam_vals = []
     for r in row_idxs:
         total_cell = df_dio.iat[r, 4 + ncols] if (4 + ncols) < df_dio.shape[1] else None
         toplam_vals.append(to_numeric_locale_aware(pd.Series([total_cell])).iloc[0])
     toplam_series = pd.to_numeric(pd.Series(toplam_vals), errors="coerce")
     toplam = float(toplam_series.fillna(0).sum())
-
     return out, toplam, None
 
 def build_monthly_performance_ui(perf_path: Path):
-    with st.expander("📊 Model Aylık Performans (Retail / Handover / Presold / Free)", expanded=True):
+    with st.expander("📊 Model Aylık Performans (Retail / Handover / Presold / Free / Walk-in / Test Sürüşü)", expanded=True):
         if perf_path is None:
             st.warning("Aylık performans dosyası bulunamadı. Lütfen 'Model aylık performans.xlsx' dosyasını `data/` klasörüne koy.")
             return
 
-        # ---- CSS: Açık mavi kutular ----
+        # ---- CSS ----
         st.markdown("""
         <style>
-        .kv-row {display:flex; gap:12px; flex-wrap:wrap;}
+        .kv-row {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(160px, 1fr));
+            gap: 12px;
+            align-items: stretch;
+        }
         .kv-box {
-            flex:1 1 0;
             background:#eaf3ff;
             border:1px solid #d6e7ff;
-            border-radius:12px;
-            padding:14px 16px;
-            min-width:180px;
+            border-radius:18px;
+            padding:16px 18px;
             text-align:center;
         }
-        .kv-title { font-size:12px; color:#2a4a7a; letter-spacing:.3px; text-transform:uppercase; margin-bottom:6px; }
-        .kv-value { font-size:22px; font-weight:700; }
+        .kv-title { font-size:12px; color:#2a4a7a; letter-spacing:.35px; text-transform:uppercase; margin-bottom:6px; }
+        .kv-value { font-size:26px; font-weight:800; color:#0c203a; }
+        .kv-sub { font-size:12px; color:#5e738f; margin-top:4px; }
+        .kv-delta { display:inline-block; font-weight:700; margin-top:6px; margin-right:6px; }
+        .delta-pos { color:#0f9d58; }
+        .delta-neg { color:#d93025; }
+        @media (max-width: 1200px){ .kv-row { grid-template-columns: repeat(3, minmax(160px, 1fr)); } }
+        @media (max-width: 800px){ .kv-row { grid-template-columns: repeat(2, minmax(140px, 1fr)); } }
         </style>
         """, unsafe_allow_html=True)
-        st.markdown("""
-            <style>
-            .kv-sub { font-size:12px; color:#5e738f; margin-top:4px; }
-            .kv-delta { display:inline-block; font-weight:700; margin-top:4px; margin-right:6px; }
-            .delta-pos { color:#0f9d58; }   /* yeşil */
-            .delta-neg { color:#d93025; }   /* kırmızı */
-            </style>
-            """, unsafe_allow_html=True)
-
 
         ist_tz = zoneinfo.ZoneInfo("Europe/Istanbul")
         month_abbr = datetime.now(ist_tz).strftime("%b")
@@ -479,44 +427,48 @@ def build_monthly_performance_ui(perf_path: Path):
             key="perf_model_select"
         )
 
+        # 1) Retail/Handover (toplayarak)
         rh = get_retail_handover_month_only(perf_path, selected_perf_model, month_abbr)
+        # 2) Presold/Free (toplayarak)
         pf = get_presold_free(perf_path, selected_perf_model)
-
-        def _fmt(v):
-            return "—" if v is None or pd.isna(v) else f"{float(v):,.0f}"
-
-        # ---- 4 kutu tek satır ----
-        st.markdown(
-            f"""
-            <div class="kv-row">
-              <div class="kv-box"><div class="kv-title">Retail ({month_abbr})</div><div class="kv-value">{_fmt(rh.get("retail_month"))}</div></div>
-              <div class="kv-box"><div class="kv-title">Handover ({month_abbr})</div><div class="kv-value">{_fmt(rh.get("handover_month"))}</div></div>
-              <div class="kv-box"><div class="kv-title">Presold</div><div class="kv-value">{_fmt(pf.get("presold"))}</div></div>
-              <div class="kv-box"><div class="kv-title">Free</div><div class="kv-value">{_fmt(pf.get("free"))}</div></div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        
-        st.caption(f"Kaynak: {perf_path.name}  •  Ay: {month_abbr}")
-
-        
-                # ---- Walk-in & Test Sürüşü (Series -> BMW Showroom Seri Bazlı) ----
+        # 3) Walk-in / Test Sürüşü (Series -> Showroom)
         series_name = _find_series_for_model(perf_path, selected_perf_model, sheet_name="Series")
-        if not series_name:
-            st.info("Series sayfasında seçilen model için seri bulunamadı.")
-        else:
-            showroom = _get_showroom_kpis(perf_path, series_name, sheet_name="BMW Showroom Seri Bazlı")
+        showroom = _get_showroom_kpis(perf_path, series_name, sheet_name="BMW Showroom Seri Bazlı") if series_name else \
+                   {"walk_cur": None, "walk_prev": None, "test_cur": None, "test_prev": None}
 
-            walk_html = _format_kpi_box("Walk-in", showroom.get("walk_cur"), showroom.get("walk_prev"))
-            test_html = _format_kpi_box("Test Sürüşü", showroom.get("test_cur"), showroom.get("test_prev"))
-
-            st.markdown(f"""
-            <div class="kv-row">
-              {walk_html}
-              {test_html}
-            </div>
-            """, unsafe_allow_html=True)
+        # HTML: 6 kutu aynı satırda
+        html = f"""
+        <div class="kv-row">
+          <div class="kv-box">
+            <div class="kv-title">Retail ({month_abbr})</div>
+            <div class="kv-value">{fmt_int(rh.get("retail_month"))}</div>
+          </div>
+          <div class="kv-box">
+            <div class="kv-title">Handover ({month_abbr})</div>
+            <div class="kv-value">{fmt_int(rh.get("handover_month"))}</div>
+          </div>
+          <div class="kv-box">
+            <div class="kv-title">Presold</div>
+            <div class="kv-value">{fmt_int(pf.get("presold"))}</div>
+          </div>
+          <div class="kv-box">
+            <div class="kv-title">Free</div>
+            <div class="kv-value">{fmt_int(pf.get("free"))}</div>
+          </div>
+          <div class="kv-box">
+            <div class="kv-title">Walk-in</div>
+            <div class="kv-value">{fmt_int(showroom.get("walk_cur"))}</div>
+            {_delta_html(showroom.get("walk_cur"), showroom.get("walk_prev"))}
+          </div>
+          <div class="kv-box">
+            <div class="kv-title">Test Sürüşü</div>
+            <div class="kv-value">{fmt_int(showroom.get("test_cur"))}</div>
+            {_delta_html(showroom.get("test_cur"), showroom.get("test_prev"))}
+          </div>
+        </div>
+        """
+        st.markdown(html, unsafe_allow_html=True)
+        st.caption(f"Kaynak: {perf_path.name}  •  Ay: {month_abbr}")
 
         # ---- Günlük DIO Model Grafiği + Toplam ----
         st.markdown("### Günlük DIO Model")
@@ -529,10 +481,7 @@ def build_monthly_performance_ui(perf_path: Path):
             else:
                 import altair as alt
                 BAR_COLOR = "#2a4a7a"
-
-                # Başlıkta toplamı göster (toplam: aynı modeldeki tüm satırların toplamı)
                 baslik = f"{selected_perf_model} • Günlük DIO Model • Toplam: {dio_total:,.0f}".replace(",", ".")
-
                 base = alt.Chart(dio_df).encode(
                     x=alt.X("TarihLabel:N", title="Gün", sort=list(dio_df["TarihLabel"].astype(str))),
                     y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True, zero=True)),
@@ -564,6 +513,107 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# === ODMD Sonuçları (Aylık / 3 Aylık / YTD) — Monthly Basis (aynı dosya içinde) ===
+import pandas as pd
+import numpy as np
+import streamlit as st
+from pathlib import Path
+from datetime import datetime
+import pytz
+import re
+
+IST_TZ = pytz.timezone("Europe/Istanbul")
+MONTHS_EN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
+@st.cache_data(show_spinner=False)
+def load_focus_segment_df_from_perf(perf_path: Path, sheet_name: str = "Monthly Basis"):
+    """
+    'Model aylık performans.xlsx' içerisindeki 'Monthly Basis' sayfasından
+    D:S aralığını (D=Marka, E=Model, G..R=Jan..Dec, S=YTD) okur.
+    """
+    if perf_path is None or not perf_path.exists():
+        raise ValueError("Model aylık performans dosyası bulunamadı.")
+    xls = pd.ExcelFile(perf_path, engine="openpyxl")
+    if sheet_name not in xls.sheet_names:
+        raise ValueError(f"'{sheet_name}' sayfası dosyada yok. Mevcut sayfalar: {xls.sheet_names}")
+
+    col_names = ["Marka","Model"] + MONTHS_EN + ["YTD"]  # 15 kolon
+    usecols_letters = ["D","E"] + [chr(c) for c in range(ord("G"), ord("R")+1)] + ["S"]
+
+    df = pd.read_excel(
+        xls,
+        sheet_name=sheet_name,
+        header=None,
+        skiprows=9,
+        usecols=",".join(usecols_letters),
+    )
+    df.columns = col_names
+
+    def to_num(x):
+        if isinstance(x, str):
+            x = x.strip().replace(".", "").replace(",", ".")
+            x = re.sub(r"[^\d\.-]", "", x)
+        return pd.to_numeric(x, errors="coerce")
+
+    for c in MONTHS_EN + ["YTD"]:
+        df[c] = df[c].apply(to_num)
+
+    # Grup ID (D sütunundaki boş satırlar grup ayırıcısı)
+    group_id = []
+    g = -1
+    for _, row in df.iterrows():
+        marka = row["Marka"]
+        if pd.isna(marka) or (isinstance(marka, str) and marka.strip() == ""):
+            group_id.append(np.nan)
+            g += 1
+        else:
+            if len(group_id) == 0 or pd.isna(group_id[-1]):
+                g = g if g >= 0 else 0
+            group_id.append(g)
+    df["group_id"] = group_id
+
+    data_df = df[~df["Marka"].isna()].copy()
+    data_df["Marka"] = data_df["Marka"].astype(str).str.strip()
+    data_df["Model"] = data_df["Model"].astype(str).str.strip()
+    return data_df
+
+def current_month_info():
+    now = datetime.now(IST_TZ)
+    cur_month_idx = now.month - 1
+    prev_idx = (cur_month_idx - 1) % 12
+    last3 = [ (prev_idx - 2) % 12, (prev_idx - 1) % 12, prev_idx ]
+    return cur_month_idx, prev_idx, last3, now
+
+def compute_metrics(df: pd.DataFrame):
+    cur_idx, prev_idx, last3, _ = current_month_info()
+    prev_month_name = MONTHS_EN[prev_idx]
+    last3_names = [MONTHS_EN[i] for i in last3]
+
+    work = df.copy()
+    work["Aylık Satış"] = work[prev_month_name]
+    work["3 Aylık Satış"] = work[last3_names].mean(axis=1, skipna=True)
+
+    denom = max(cur_idx, 1)  # Ocak'ta 0'a bölmeyi engelle
+    work["YTD Satış"] = work["YTD"] / denom
+
+    out = work[["Marka","Model","Aylık Satış","3 Aylık Satış","YTD Satış","YTD","group_id"]].copy()
+    return out, prev_month_name, last3_names, denom
+
+def style_bmw_first(df: pd.DataFrame):
+    df = df.copy()
+    df["__bmw__"] = (df["Marka"].str.upper() == "BMW").astype(int)
+    df = df.sort_values(by=["__bmw__","Marka","Model"], ascending=[False, True, True]).drop(columns="__bmw__")
+    return df
+
+def format_int(x):
+    if pd.isna(x):
+        return ""
+    try:
+        return f"{int(round(x)):,}".replace(",", ".")
+    except:
+        return str(x)
+
 
 # === ODMD Sonuçları (Aylık / 3 Aylık / YTD) — Monthly Basis (aynı dosya içinde) ===
 import pandas as pd
