@@ -265,16 +265,12 @@ def get_presold_free(perf_path: Path, model_name: str) -> dict:
     return res
 
 # ================== YENİ: DIO Model (Günlük DIO grafiği) ==================
+# ================== YENİ: DIO Model (Günlük DIO grafiği) ==================
 MONTHS_EN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 IST_TZ = pytz.timezone("Europe/Istanbul")
 
 @st.cache_data(show_spinner=False)
-def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO Model") -> pd.DataFrame | None:
-    """
-    'DIO Model' sayfasını header'sız okur.
-    Gün başlıkları E6 hücresinden yatay başlar (1..31),
-    model adları D9'dan itibaren D sütununda.
-    """
+def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO model") -> pd.DataFrame | None:
     try:
         df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
         return df
@@ -282,27 +278,30 @@ def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO Model") -> pd.DataFra
         return None
 
 def _find_model_row_in_dio(df_dio: pd.DataFrame, model_name: str) -> int | None:
-    # D sütunu = index 3; veri D9'dan başlıyor => 0-index'te 8
+    # D sütunu (index 3): model isimleri D9'dan itibaren
     col = df_dio.iloc[:, 3].astype(str).str.strip()
     mask = (col.str.casefold() == model_name.strip().casefold())
     idx = mask[mask].index
     return int(idx[0]) if len(idx) else None
 
-def _extract_day_headers(df_dio: pd.DataFrame) -> list[int]:
-    # E6 hücresi gün başlıklarının başladığı yer => satır 6 => index 5, sütun E => index 4
+def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp], int]:
+    """
+    6. satır (index 5), E sütunundan (index 4) itibaren tarih başlıklarını oku.
+    Örn: E6=1.10.2025, F6=2.10.2025, ...
+    İlk boş/bozulmuş hücrede dur.
+    """
     headers = df_dio.iloc[5, 4:].tolist()
-    days = []
+    dates: list[pd.Timestamp] = []
+    count = 0
     for h in headers:
-        # başlıklar 1..31 veya '1', '01' vb olabilir
-        try:
-            d = int(str(h).strip().split(".")[0])
-            if 1 <= d <= 31:
-                days.append(d)
-            else:
-                break
-        except Exception:
+        if pd.isna(h) or str(h).strip() == "":
             break
-    return days
+        dt = pd.to_datetime(h, dayfirst=True, errors="coerce")
+        if pd.isna(dt):
+            break
+        dates.append(dt)
+        count += 1
+    return dates, count
 
 def current_month_info():
     now = datetime.now(IST_TZ)
@@ -314,31 +313,29 @@ def current_month_info():
 
 def get_dio_timeseries(perf_path: Path, model_name: str):
     """
-    DIO Model sayfasından seçilen modelin gün-özel serisini döner.
-    Gün = 1..today, Değer = ilgili satırdaki E:?? hücreleri.
+    DIO model sayfasından seçilen model için:
+      - X: tarih (E6'dan sağa, ilk boşluğa kadar)
+      - Y: ilgili satırdaki değerler (aynı sayıda hücre)
     """
-    df_dio = load_dio_sheet(perf_path, "DIO Model")
+    df_dio = load_dio_sheet(perf_path, "DIO model")
     if df_dio is None:
-        return None, "DIO Model sayfası bulunamadı."
+        return None, "DIO model sayfası bulunamadı."
     row_idx = _find_model_row_in_dio(df_dio, model_name)
     if row_idx is None:
-        return None, f"'{model_name}' modeli DIO Model sayfasında bulunamadı."
-    day_headers = _extract_day_headers(df_dio)
-    if not day_headers:
-        return None, "DIO Model sayfasında E6'dan başlayan gün başlıkları okunamadı."
+        return None, f"'{model_name}' modeli DIO model sayfasında bulunamadı."
 
-    today_day = datetime.now(IST_TZ).day
-    usable_days = [d for d in day_headers if d <= today_day]
-    # E sütunu index 4, değerler aynı satır (row_idx)
-    vals = df_dio.iloc[row_idx, 4:4+len(usable_days)].tolist()
+    dates, ncols = _extract_day_headers_dates(df_dio)
+    if ncols == 0:
+        return None, "DIO model sayfasında E6'dan başlayan tarih başlıkları okunamadı."
 
-    # Normalize numeric
-    ser = pd.Series(vals)
-    ser = to_numeric_locale_aware(ser)
+    # E sütunu index 4; seçilen modelin satırından ncols kadar değer çek
+    vals_raw = df_dio.iloc[row_idx, 4:4+ncols].tolist()
+    vals_num = to_numeric_locale_aware(pd.Series(vals_raw))
 
-    out = pd.DataFrame({"Gün": usable_days, "Değer": ser})
-    # Baştaki/aradaki tamamen boş günler varsa 0 yerine NaN kalsın, grafik yine gösterir.
+    out = pd.DataFrame({"Tarih": dates, "Değer": vals_num})
+    # (İstersen bugünden ileri tarihleri filtreleyebilirsin ama genelde boş hücreyle zaten son buluyor.)
     return out, None
+
 
 # ================== UI: Aylık Performans + Günlük DIO ==================
 def build_monthly_performance_ui(perf_path: Path):
@@ -424,40 +421,37 @@ def build_monthly_performance_ui(perf_path: Path):
         st.caption(f"Kaynak: {perf_path.name}  •  Ay: {month_abbr}")
 
         # ---- YENİ: Günlük DIO Grafiği ----
-        st.markdown("### Günlük DIO")
+    st.markdown("### Günlük DIO")
+    
+    dio_df, dio_err = get_dio_timeseries(perf_path, selected_perf_model)
+    if dio_err:
+        st.warning(dio_err)
+        return
+    
+    if dio_df is None or dio_df["Değer"].isna().all():
+        st.info("Seçilen model için DIO verisi bulunamadı veya tamamen boş.")
+        return
+    
+    import altair as alt
+    BAR_COLOR = "#2a4a7a"  # üstteki kutularla uyumlu
+    
+    base = alt.Chart(dio_df).encode(
+        x=alt.X("Tarih:T", title="Gün", axis=alt.Axis(format="%d.%m")),
+        y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True)),
+        tooltip=[alt.Tooltip("Tarih:T", format="%d.%m.%Y"), alt.Tooltip("Değer:Q", format=",.0f")]
+    )
+    
+    bars = base.mark_bar(color=BAR_COLOR).properties(height=260)
+    
+    labels = base.mark_text(
+        dy=-5,
+        fontSize=11,
+        color=BAR_COLOR
+    ).encode(text=alt.Text("Değer:Q", format=",.0f"))
+    
+    chart = (bars + labels).resolve_scale(y='shared').properties(title=f"{selected_perf_model} • Günlük DIO")
+    st.altair_chart(chart, use_container_width=True)
 
-        dio_df, dio_err = get_dio_timeseries(perf_path, selected_perf_model)
-        if dio_err:
-            st.warning(dio_err)
-            return
-
-        if dio_df is None or dio_df["Değer"].isna().all():
-            st.info("Seçilen model için DIO verisi bulunamadı veya tamamen boş.")
-            return
-
-        # Altair ile sütun grafiği + bar üstü etiketler
-        import altair as alt
-        # Koyu mavi: kutu başlık rengi ile uyumlu
-        BAR_COLOR = "#2a4a7a"
-
-        base = alt.Chart(dio_df).encode(
-            x=alt.X("Gün:O", title="Gün"),
-            y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True)),
-            tooltip=[alt.Tooltip("Gün:O"), alt.Tooltip("Değer:Q", format=",.0f")]
-        )
-
-        bars = base.mark_bar(color=BAR_COLOR).properties(height=260)
-
-        labels = base.mark_text(
-            dy=-5,  # barın üstünde
-            fontSize=11,
-            color=BAR_COLOR
-        ).encode(
-            text=alt.Text("Değer:Q", format=",.0f")
-        )
-
-        chart = (bars + labels).resolve_scale(y='shared').properties(title=f"{selected_perf_model} • Günlük DIO")
-        st.altair_chart(chart, use_container_width=True)
 
 # ================== Uygulama Akışı ==================
 def main():
