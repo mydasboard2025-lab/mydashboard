@@ -269,9 +269,9 @@ MONTHS_EN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","
 IST_TZ = pytz.timezone("Europe/Istanbul")
 
 @st.cache_data(show_spinner=False)
-def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO model") -> pd.DataFrame | None:
+def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO Model") -> pd.DataFrame | None:
     """
-    'DIO model' sayfasını header'sız okur.
+    'DIO Model' sayfasını header'sız okur.
     Gün başlıkları E6 hücresinden yatay başlar (1..31),
     model adları D9'dan itibaren D sütununda.
     """
@@ -314,18 +314,18 @@ def current_month_info():
 
 def get_dio_timeseries(perf_path: Path, model_name: str):
     """
-    DIO model sayfasından seçilen modelin gün-özel serisini döner.
+    DIO Model sayfasından seçilen modelin gün-özel serisini döner.
     Gün = 1..today, Değer = ilgili satırdaki E:?? hücreleri.
     """
-    df_dio = load_dio_sheet(perf_path, "DIO model")
+    df_dio = load_dio_sheet(perf_path, "DIO Model")
     if df_dio is None:
-        return None, "DIO model sayfası bulunamadı."
+        return None, "DIO Model sayfası bulunamadı."
     row_idx = _find_model_row_in_dio(df_dio, model_name)
     if row_idx is None:
-        return None, f"'{model_name}' modeli DIO model sayfasında bulunamadı."
+        return None, f"'{model_name}' modeli DIO Model sayfasında bulunamadı."
     day_headers = _extract_day_headers(df_dio)
     if not day_headers:
-        return None, "DIO model sayfasında E6'dan başlayan gün başlıkları okunamadı."
+        return None, "DIO Model sayfasında E6'dan başlayan gün başlıkları okunamadı."
 
     today_day = datetime.now(IST_TZ).day
     usable_days = [d for d in day_headers if d <= today_day]
