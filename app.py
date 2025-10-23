@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import re
@@ -59,7 +58,7 @@ def fmt_numeric(df: pd.DataFrame) -> pd.DataFrame:
             df[c] = conv
     return df
 
-# ================== Rakip Karşılaştırma (Önceki Kurgu) ==================
+# ================== Rakip Karşılaştırma ==================
 def find_price_excel(data_dir: Path) -> Path | None:
     if not data_dir.exists():
         return None
@@ -207,7 +206,7 @@ def _month_col_index_by_abbr(df: pd.DataFrame, month_abbr: str, start_col: int =
         val = str(hdr.iloc[j]).strip().lower()
         if not val:
             continue
-        if val == target or target in val:  # 'Oct' veya 'October' eşleşsin
+        if val == target or target in val:
             return j
     return None
 
@@ -269,14 +268,9 @@ def get_presold_free(perf_path: Path, model_name: str) -> dict:
         res["free"] = None
     return res
 
-# ---------- YENİ: DIO Model (Günlük DIO grafiği) ----------
+# ---------- DIO Model (Günlük DIO grafiği) ----------
 @st.cache_data(show_spinner=False)
 def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO Model") -> pd.DataFrame | None:
-    """
-    'DIO Model' sayfasını header'sız okur.
-    Tarih başlıkları 6. satır (index 5) E sütunundan (index 4) sağa doğru gider.
-    Model adları D sütununda (D9'dan itibaren).
-    """
     try:
         df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
         return df
@@ -284,19 +278,13 @@ def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO Model") -> pd.DataFra
         return None
 
 def _find_model_row_in_dio(df_dio: pd.DataFrame, model_name: str) -> int | None:
-    # D sütunu (index 3): model isimleri D9'dan itibaren
-    col = df_dio.iloc[:, 3].astype(str).str.strip()
+    col = df_dio.iloc[:, 3].astype(str).str.strip()  # D sütunu
     mask = (col.str.casefold() == model_name.strip().casefold())
     idx = mask[mask].index
     return int(idx[0]) if len(idx) else None
 
 def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp], int]:
-    """
-    6. satır (index 5), E sütunundan (index 4) itibaren tarih başlıklarını oku.
-    Örn: E6=1.10.2025, F6=2.10.2025, ...
-    İlk boş/bozulmuş hücrede DUR. (Değerlerdeki boşlar grafikte 0 olarak gösterilecek.)
-    """
-    headers = df_dio.iloc[5, 4:].tolist()
+    headers = df_dio.iloc[5, 4:].tolist()  # 6. satır, E sütunundan sağa
     dates: list[pd.Timestamp] = []
     ncols = 0
     for h in headers:
@@ -310,11 +298,6 @@ def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp]
     return dates, ncols
 
 def get_dio_timeseries(perf_path: Path, model_name: str):
-    """
-    DIO Model sayfasından seçilen model için:
-      - X: tarih (E6'dan sağa, başlıklar bittiği yere kadar)
-      - Y: ilgili satırdaki değerler (aynı sayıda hücre); boş/NaN/None -> 0, metin -> parse -> NaN -> 0
-    """
     df_dio = load_dio_sheet(perf_path, "DIO Model")
     if df_dio is None:
         return None, "DIO Model sayfası bulunamadı."
@@ -326,11 +309,14 @@ def get_dio_timeseries(perf_path: Path, model_name: str):
     if ncols == 0:
         return None, "DIO Model sayfasında E6'dan başlayan tarih başlıkları okunamadı."
 
-    # E sütunu index 4; seçilen modelin satırından ncols kadar değer çek
-    vals_raw = df_dio.iloc[row_idx, 4:4+ncols].tolist()
-    vals_num = to_numeric_locale_aware(pd.Series(vals_raw)).fillna(0)  # boş/NaN -> 0 yap
+    vals_raw = df_dio.iloc[row_idx, 4:4+ncols].tolist()  # E sütunundan ncols kadar
+    vals_num = to_numeric_locale_aware(pd.Series(vals_raw)).fillna(0)
 
     out = pd.DataFrame({"Tarih": dates, "Değer": vals_num.astype(float)})
+    # EKSEN İÇİN LABEL (kategori): 01.10, 02.10, ...
+    out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
+    # Orijinal sıralamayı korumak için kategorik sırayı sabitle
+    out["TarihLabel"] = pd.Categorical(out["TarihLabel"], categories=out["TarihLabel"].tolist(), ordered=True)
     return out, None
 
 def build_monthly_performance_ui(perf_path: Path):
@@ -345,30 +331,20 @@ def build_monthly_performance_ui(perf_path: Path):
         .kv-row {display:flex; gap:12px; flex-wrap:wrap;}
         .kv-box {
             flex:1 1 0;
-            background:#eaf3ff;                 /* açık mavi */
+            background:#eaf3ff;
             border:1px solid #d6e7ff;
             border-radius:12px;
             padding:14px 16px;
             min-width:180px;
             text-align:center;
         }
-        .kv-title {
-            font-size:12px;
-            color:#2a4a7a;
-            letter-spacing:.3px;
-            text-transform:uppercase;
-            margin-bottom:6px;
-        }
-        .kv-value {
-            font-size:22px;
-            font-weight:700;
-        }
+        .kv-title { font-size:12px; color:#2a4a7a; letter-spacing:.3px; text-transform:uppercase; margin-bottom:6px; }
+        .kv-value { font-size:22px; font-weight:700; }
         </style>
         """, unsafe_allow_html=True)
 
-        # Kullanıcı TZ: Europe/Istanbul, ay başlığı İngilizce kısaltma ('Oct' gibi)
         ist_tz = zoneinfo.ZoneInfo("Europe/Istanbul")
-        month_abbr = datetime.now(ist_tz).strftime("%b")  # 'Oct', 'Nov', ...
+        month_abbr = datetime.now(ist_tz).strftime("%b")
 
         model_options = load_model_lists(perf_path)
         if not model_options:
@@ -388,26 +364,13 @@ def build_monthly_performance_ui(perf_path: Path):
         def _fmt(v):
             return "—" if v is None or pd.isna(v) else f"{float(v):,.0f}"
 
-        # ---- 4 kutu tek satır ----
         st.markdown(
             f"""
             <div class="kv-row">
-              <div class="kv-box">
-                <div class="kv-title">Retail ({month_abbr})</div>
-                <div class="kv-value">{_fmt(rh.get("retail_month"))}</div>
-              </div>
-              <div class="kv-box">
-                <div class="kv-title">Handover ({month_abbr})</div>
-                <div class="kv-value">{_fmt(rh.get("handover_month"))}</div>
-              </div>
-              <div class="kv-box">
-                <div class="kv-title">Presold</div>
-                <div class="kv-value">{_fmt(pf.get("presold"))}</div>
-              </div>
-              <div class="kv-box">
-                <div class="kv-title">Free</div>
-                <div class="kv-value">{_fmt(pf.get("free"))}</div>
-              </div>
+              <div class="kv-box"><div class="kv-title">Retail ({month_abbr})</div><div class="kv-value">{_fmt(rh.get("retail_month"))}</div></div>
+              <div class="kv-box"><div class="kv-title">Handover ({month_abbr})</div><div class="kv-value">{_fmt(rh.get("handover_month"))}</div></div>
+              <div class="kv-box"><div class="kv-title">Presold</div><div class="kv-value">{_fmt(pf.get("presold"))}</div></div>
+              <div class="kv-box"><div class="kv-title">Free</div><div class="kv-value">{_fmt(pf.get("free"))}</div></div>
             </div>
             """,
             unsafe_allow_html=True
@@ -425,21 +388,20 @@ def build_monthly_performance_ui(perf_path: Path):
                 st.info("Seçilen model için DIO verisi bulunamadı.")
             else:
                 import altair as alt
-                BAR_COLOR = "#2a4a7a"  # kutu başlık rengiyle uyumlu
+                BAR_COLOR = "#2a4a7a"
 
+                # X ekseni kategori: her güne tek etiket
                 base = alt.Chart(dio_df).encode(
-                    x=alt.X("Tarih:T", title="Gün", axis=alt.Axis(format="%d.%m")),
+                    x=alt.X("TarihLabel:N", title="Gün", sort=list(dio_df["TarihLabel"].astype(str))),
                     y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True, zero=True)),
-                    tooltip=[alt.Tooltip("Tarih:T", format="%d.%m.%Y"),
+                    tooltip=[alt.Tooltip("Tarih:T", title="Tarih", format="%d.%m.%Y"),
                              alt.Tooltip("Değer:Q", format=",.0f")]
                 )
 
                 bars = base.mark_bar(color=BAR_COLOR).properties(height=260)
 
                 labels = base.mark_text(
-                    dy=-5,
-                    fontSize=11,
-                    color=BAR_COLOR
+                    dy=-5, fontSize=11, color=BAR_COLOR
                 ).encode(text=alt.Text("Değer:Q", format=",.0f"))
 
                 chart = (bars + labels).resolve_scale(y='shared').properties(
@@ -467,8 +429,7 @@ def main():
 if __name__ == "__main__":
     main()
 
-# === Yeni Bölüm: Satış Performansı Tablosu (Aylık / 3 Aylık / YTD) — Monthly Basis seçimi ===
-# (Bu bölüm olduğu gibi korunuyor)
+# === Satış Performansı Tablosu (Aylık / 3 Aylık / YTD) — Monthly Basis ===
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -479,9 +440,6 @@ import re
 import glob
 import os
 
-# -------------------------------------------------------------
-# Yardımcılar
-# -------------------------------------------------------------
 IST_TZ = pytz.timezone("Europe/Istanbul")
 MONTHS_EN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
@@ -506,20 +464,11 @@ def load_focus_segment_df(file_path: str, sheet_name: str = "Monthly Basis"):
     if sheet_name.lower() not in available_sheets:
         raise ValueError(f"'{sheet_name}' sayfası bulunamadı. Mevcut sayfalar: {xls.sheet_names}")
 
-    col_names = ["Marka","Model"] + MONTHS_EN + ["YTD"]  # 15 kolon
+    col_names = ["Marka","Model"] + MONTHS_EN + ["YTD"]
 
-    usecols_letters = (
-        ["D","E"] +
-        [chr(c) for c in range(ord("G"), ord("R")+1)] +  # G..R
-        ["S"]
-    )
-    
+    usecols_letters = (["D","E"] + [chr(c) for c in range(ord("G"), ord("R")+1)] + ["S"])
     df = pd.read_excel(
-        xls,
-        sheet_name=sheet_name,
-        header=None,
-        skiprows=9,
-        usecols=",".join(usecols_letters),
+        xls, sheet_name=sheet_name, header=None, skiprows=9, usecols=",".join(usecols_letters),
     )
     df.columns = col_names
 
@@ -548,13 +497,11 @@ def load_focus_segment_df(file_path: str, sheet_name: str = "Monthly Basis"):
     data_df = df[~df["Marka"].isna()].copy()
     data_df["Marka"] = data_df["Marka"].astype(str).str.strip()
     data_df["Model"] = data_df["Model"].astype(str).str.strip()
-
     return data_df
 
 def current_month_info():
     now = datetime.now(IST_TZ)
-    cur_month_num = now.month  # 1..12
-    cur_month_idx = cur_month_num - 1
+    cur_month_idx = now.month - 1
     prev_idx = (cur_month_idx - 1) % 12
     last3 = [ (prev_idx - 2) % 12, (prev_idx - 1) % 12, prev_idx ]
     return cur_month_idx, prev_idx, last3, now
@@ -568,7 +515,7 @@ def compute_metrics(df: pd.DataFrame):
     work["Aylık Satış"] = work[prev_month_name]
     work["3 Aylık Satış"] = work[last3_names].mean(axis=1, skipna=True)
 
-    denom = max(cur_idx, 1)  # Ocak'ta 0'a bölmeyi engelle
+    denom = max(cur_idx, 1)  # Ocak'ta 0'a bölme engeli
     work["YTD Satış"] = work["YTD"] / denom
 
     out = work[["Marka","Model","Aylık Satış","3 Aylık Satış","YTD Satış","YTD","group_id"]].copy()
@@ -581,16 +528,11 @@ def style_bmw_first(df: pd.DataFrame):
     return df
 
 def format_int(x):
-    if pd.isna(x):
-        return ""
-    try:
-        return f"{int(round(x)):,}".replace(",", ".")
-    except:
-        return str(x)
+    if pd.isna(x): return ""
+    try: return f"{int(round(x)):,}".replace(",", ".")
+    except: return str(x)
 
-# -------------------------------------------------------------
-# UI: Bölüm
-# -------------------------------------------------------------
+# ---- UI: Bölüm ----
 st.markdown("## Satış Performansı (Aylık / 3 Aylık / YTD) — Monthly Basis")
 
 monthly_file = _pick_monthly_basis_file(search_dir="data")
@@ -607,8 +549,7 @@ except ValueError as e:
 calc_df, prev_month_name, last3_names, ytd_denom = compute_metrics(data_df)
 calc_df = calc_df[calc_df["YTD"].fillna(0) != 0].copy()
 
-bmw_models = (calc_df.loc[calc_df["Marka"].str.upper() == "BMW", "Model"]
-              .dropna().drop_duplicates().tolist())
+bmw_models = (calc_df.loc[calc_df["Marka"].str.upper() == "BMW", "Model"].dropna().drop_duplicates().tolist())
 if not bmw_models:
     st.info("BMW modeli bulunamadı. Lütfen 'Monthly Basis' sayfasındaki verileri kontrol edin.")
     st.stop()
@@ -636,8 +577,7 @@ view = style_bmw_first(view)
 
 cur_idx, prev_idx, last3, now = current_month_info()
 st.caption(
-    f"Dosya: `{Path(monthly_file).name}` • "
-    f"Sayfa: 'Monthly Basis' • "
+    f"Dosya: `{Path(monthly_file).name}` • Sayfa: 'Monthly Basis' • "
     f"İçinde bulunulan ay: **{MONTHS_EN[cur_idx]}** • "
     f"Aylık Satış = **{MONTHS_EN[prev_idx]}** • "
     f"3 Aylık = {', '.join(MONTHS_EN[i] for i in last3)} • "
@@ -648,7 +588,6 @@ styled = (view.style
     .apply(lambda s: ["font-weight: 700" if (s.name in view.index and view.loc[s.name, "Marka"].upper()=="BMW") else "" for _ in s], axis=1)
     .format({"Aylık Satış": format_int, "3 Aylık Satış": format_int, "YTD Satış": format_int})
 )
-
 st.dataframe(styled, use_container_width=True)
 
 csv_bytes = view.to_csv(index=False).encode("utf-8")
@@ -658,4 +597,3 @@ st.download_button(
     file_name=f"satis_performansi_{Path(monthly_file).stem.replace(' ','_')}_{selected_bmw.replace(' ','_')}.csv",
     mime="text/csv"
 )
-# === /Bölüm Sonu ===
