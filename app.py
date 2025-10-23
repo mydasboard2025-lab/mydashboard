@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import re
@@ -17,6 +18,10 @@ DATA_DIR = Path("data")
 # Dosya isimleri
 PRICE_FILE_NAME = "Fiyat Karşılaştırması_v4.xlsx"      # Rakip karşılaştırma
 PERF_FILE_NAME  = "Model aylık performans.xlsx"        # Retail/Handover/Presold/Free
+
+# Ortak sabitler
+IST_TZ = pytz.timezone("Europe/Istanbul")
+MONTHS_EN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
 # ================== Yardımcı Fonksiyonlar ==================
 def to_numeric_locale_aware(s: pd.Series) -> pd.Series:
@@ -159,7 +164,7 @@ def build_price_compare_ui(df_raw: pd.DataFrame, source_path: Path):
     st.dataframe(styled, use_container_width=True, hide_index=True)
     st.caption(f"Kaynak: {source_path.name}")
 
-# ================== Aylık Performans (Retail/Handover/Presold/Free) ==================
+# ================== Aylık Performans (Retail/Handover/Presold/Free + Günlük DIO) ==================
 REQUIRED_SHEETS = {"Retail", "Handover Model", "Presold"}
 
 def find_performance_workbook(data_dir: Path) -> Path | None:
@@ -232,7 +237,7 @@ def get_retail_handover_month_only(perf_path: Path, model_name: str, month_abbr:
     for sh, key_month in [
         ("Retail", "retail_month"),
         ("Handover Model", "handover_month"),
-    ]:
+    ]]:
         df = _read_sheet(perf_path, sh)
         r_idx = _row_index_for_model(df, model_name, model_col_idx=3)
         if r_idx is None:
@@ -264,13 +269,14 @@ def get_presold_free(perf_path: Path, model_name: str) -> dict:
         res["free"] = None
     return res
 
-# ================== YENİ: DIO Model (Günlük DIO grafiği) ==================
-# ================== YENİ: DIO Model (Günlük DIO grafiği) ==================
-MONTHS_EN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-IST_TZ = pytz.timezone("Europe/Istanbul")
-
+# ---------- YENİ: DIO Model (Günlük DIO grafiği) ----------
 @st.cache_data(show_spinner=False)
 def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO model") -> pd.DataFrame | None:
+    """
+    'DIO model' sayfasını header'sız okur.
+    Tarih başlıkları 6. satır (index 5) E sütunundan (index 4) sağa doğru gider.
+    Model adları D sütununda (D9'dan itibaren).
+    """
     try:
         df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
         return df
@@ -288,11 +294,11 @@ def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp]
     """
     6. satır (index 5), E sütunundan (index 4) itibaren tarih başlıklarını oku.
     Örn: E6=1.10.2025, F6=2.10.2025, ...
-    İlk boş/bozulmuş hücrede dur.
+    İlk boş/bozulmuş hücrede DUR. (Değerlerdeki boşlar grafikte 0 olarak gösterilecek.)
     """
     headers = df_dio.iloc[5, 4:].tolist()
     dates: list[pd.Timestamp] = []
-    count = 0
+    ncols = 0
     for h in headers:
         if pd.isna(h) or str(h).strip() == "":
             break
@@ -300,22 +306,14 @@ def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp]
         if pd.isna(dt):
             break
         dates.append(dt)
-        count += 1
-    return dates, count
-
-def current_month_info():
-    now = datetime.now(IST_TZ)
-    cur_month_num = now.month
-    cur_month_idx = cur_month_num - 1
-    prev_idx = (cur_month_idx - 1) % 12
-    last3 = [ (prev_idx - 2) % 12, (prev_idx - 1) % 12, prev_idx ]
-    return cur_month_idx, prev_idx, last3, now
+        ncols += 1
+    return dates, ncols
 
 def get_dio_timeseries(perf_path: Path, model_name: str):
     """
     DIO model sayfasından seçilen model için:
-      - X: tarih (E6'dan sağa, ilk boşluğa kadar)
-      - Y: ilgili satırdaki değerler (aynı sayıda hücre)
+      - X: tarih (E6'dan sağa, başlıklar bittiği yere kadar)
+      - Y: ilgili satırdaki değerler (aynı sayıda hücre); boş/NaN/None -> 0, metin -> parse -> NaN -> 0
     """
     df_dio = load_dio_sheet(perf_path, "DIO model")
     if df_dio is None:
@@ -330,14 +328,11 @@ def get_dio_timeseries(perf_path: Path, model_name: str):
 
     # E sütunu index 4; seçilen modelin satırından ncols kadar değer çek
     vals_raw = df_dio.iloc[row_idx, 4:4+ncols].tolist()
-    vals_num = to_numeric_locale_aware(pd.Series(vals_raw))
+    vals_num = to_numeric_locale_aware(pd.Series(vals_raw)).fillna(0)  # boş/NaN -> 0 yap
 
-    out = pd.DataFrame({"Tarih": dates, "Değer": vals_num})
-    # (İstersen bugünden ileri tarihleri filtreleyebilirsin ama genelde boş hücreyle zaten son buluyor.)
+    out = pd.DataFrame({"Tarih": dates, "Değer": vals_num.astype(float)})
     return out, None
 
-
-# ================== UI: Aylık Performans + Günlük DIO ==================
 def build_monthly_performance_ui(perf_path: Path):
     with st.expander("📊 Model Aylık Performans (Retail / Handover / Presold / Free)", expanded=True):
         if perf_path is None:
@@ -420,38 +415,37 @@ def build_monthly_performance_ui(perf_path: Path):
 
         st.caption(f"Kaynak: {perf_path.name}  •  Ay: {month_abbr}")
 
-        # ---- YENİ: Günlük DIO Grafiği ----
-    st.markdown("### Günlük DIO")
-    
-    dio_df, dio_err = get_dio_timeseries(perf_path, selected_perf_model)
-    if dio_err:
-        st.warning(dio_err)
-        return
-    
-    if dio_df is None or dio_df["Değer"].isna().all():
-        st.info("Seçilen model için DIO verisi bulunamadı veya tamamen boş.")
-        return
-    
-    import altair as alt
-    BAR_COLOR = "#2a4a7a"  # üstteki kutularla uyumlu
-    
-    base = alt.Chart(dio_df).encode(
-        x=alt.X("Tarih:T", title="Gün", axis=alt.Axis(format="%d.%m")),
-        y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True)),
-        tooltip=[alt.Tooltip("Tarih:T", format="%d.%m.%Y"), alt.Tooltip("Değer:Q", format=",.0f")]
-    )
-    
-    bars = base.mark_bar(color=BAR_COLOR).properties(height=260)
-    
-    labels = base.mark_text(
-        dy=-5,
-        fontSize=11,
-        color=BAR_COLOR
-    ).encode(text=alt.Text("Değer:Q", format=",.0f"))
-    
-    chart = (bars + labels).resolve_scale(y='shared').properties(title=f"{selected_perf_model} • Günlük DIO")
-    st.altair_chart(chart, use_container_width=True)
+        # ---- Günlük DIO Grafiği ----
+        st.markdown("### Günlük DIO")
+        dio_df, dio_err = get_dio_timeseries(perf_path, selected_perf_model)
+        if dio_err:
+            st.warning(dio_err)
+        else:
+            if dio_df is None or len(dio_df) == 0:
+                st.info("Seçilen model için DIO verisi bulunamadı.")
+            else:
+                import altair as alt
+                BAR_COLOR = "#2a4a7a"  # kutu başlık rengiyle uyumlu
 
+                base = alt.Chart(dio_df).encode(
+                    x=alt.X("Tarih:T", title="Gün", axis=alt.Axis(format="%d.%m")),
+                    y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True, zero=True)),
+                    tooltip=[alt.Tooltip("Tarih:T", format="%d.%m.%Y"),
+                             alt.Tooltip("Değer:Q", format=",.0f")]
+                )
+
+                bars = base.mark_bar(color=BAR_COLOR).properties(height=260)
+
+                labels = base.mark_text(
+                    dy=-5,
+                    fontSize=11,
+                    color=BAR_COLOR
+                ).encode(text=alt.Text("Değer:Q", format=",.0f"))
+
+                chart = (bars + labels).resolve_scale(y='shared').properties(
+                    title=f"{selected_perf_model} • Günlük DIO"
+                )
+                st.altair_chart(chart, use_container_width=True)
 
 # ================== Uygulama Akışı ==================
 def main():
@@ -473,7 +467,8 @@ def main():
 if __name__ == "__main__":
     main()
 
-# === (Aynen korunur) Yeni Bölüm: Satış Performansı Tablosu (Aylık / 3 Aylık / YTD) — Monthly Basis seçimi ===
+# === Yeni Bölüm: Satış Performansı Tablosu (Aylık / 3 Aylık / YTD) — Monthly Basis seçimi ===
+# (Bu bölüm olduğu gibi korunuyor)
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -610,7 +605,6 @@ except ValueError as e:
     st.stop()
 
 calc_df, prev_month_name, last3_names, ytd_denom = compute_metrics(data_df)
-
 calc_df = calc_df[calc_df["YTD"].fillna(0) != 0].copy()
 
 bmw_models = (calc_df.loc[calc_df["Marka"].str.upper() == "BMW", "Model"]
