@@ -5,6 +5,11 @@ from pathlib import Path
 from datetime import datetime
 import zoneinfo
 
+import numpy as np
+import pytz
+import glob
+import os
+
 # ================== Genel Ayarlar ==================
 st.set_page_config(page_title="Fiyat Karşılaştırması Dashboard", layout="wide")
 DATA_DIR = Path("data")
@@ -365,3 +370,203 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+# === Yeni Bölüm: Satış Performansı Tablosu (Aylık / 3 Aylık / YTD) — Monthly Basis seçimi ===
+
+
+# -------------------------------------------------------------
+# Yardımcılar
+# -------------------------------------------------------------
+IST_TZ = pytz.timezone("Europe/Istanbul")
+MONTHS_EN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
+def _pick_monthly_basis_file(search_dir="data"):
+    """
+    Sadece adında 'monthly' ve 'basis' geçen Excel dosyalarını (.xlsx/.xlsm) arar (case-insensitive).
+    Eğer birden fazla varsa, dosya değiştirilme zamanına göre en güncelini seçer.
+    """
+    patterns = [
+        os.path.join(search_dir, "*monthly*basis*.xlsx"),
+        os.path.join(search_dir, "*monthly*basis*.xlsm"),
+        os.path.join(search_dir, "*Monthly*Basis*.xlsx"),
+        os.path.join(search_dir, "*Monthly*Basis*.xlsm"),
+    ]
+    candidates = []
+    for pat in patterns:
+        candidates.extend(glob.glob(pat))
+    # unique & sort by mtime desc
+    candidates = list({Path(p).resolve() for p in candidates})
+    candidates = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(candidates[0]) if candidates else None
+
+@st.cache_data(show_spinner=False)
+def load_focus_segment_df(file_path: str, sheet_name=0):
+    """
+    Excel'den D:S aralığını okur.
+    - Veriler 10. satırdan itibaren olduğu için skiprows=9 kullanıyoruz.
+    - Kolon isimlerini sabit veriyoruz: D=Marka, E=Model, G..R=Jan..Dec, S=YTD
+    """
+    col_names = ["Marka","Model"] + MONTHS_EN + ["YTD"]
+    df = pd.read_excel(
+        file_path,
+        sheet_name=sheet_name,
+        header=None,
+        skiprows=9,          # 10. satırdan itibaren veri
+        usecols="D:S",       # D..S
+        engine="openpyxl" if file_path.lower().endswith((".xlsx",".xlsm",".xltx",".xltm")) else None
+    )
+    df.columns = col_names
+
+    # String sayıları normalize et (1.234,56 → 1234.56)
+    def to_num(x):
+        if isinstance(x, str):
+            x = x.strip().replace(".", "").replace(",", ".")
+            x = re.sub(r"[^\d\.-]", "", x)
+        return pd.to_numeric(x, errors="coerce")
+
+    for c in MONTHS_EN + ["YTD"]:
+        df[c] = df[c].apply(to_num)
+
+    # Grup ID üretimi: D sütunundaki boşluklar grup ayırıcıdır
+    group_id = []
+    g = -1
+    for _, row in df.iterrows():
+        marka = row["Marka"]
+        if pd.isna(marka) or (isinstance(marka, str) and marka.strip() == ""):
+            g += 1
+            group_id.append(np.nan)   # separator satır
+        else:
+            if len(group_id) == 0 or pd.isna(group_id[-1]):
+                g = g if g >= 0 else 0
+            group_id.append(g)
+    df["group_id"] = group_id
+
+    # Sadece dolu satırlar (separator'lar hariç)
+    data_df = df[~df["Marka"].isna()].copy()
+    data_df["Marka"] = data_df["Marka"].astype(str).str.strip()
+    data_df["Model"] = data_df["Model"].astype(str).str.strip()
+
+    return data_df
+
+def current_month_info():
+    """İstanbul saatine göre ay bilgisi ve önceki ay/son 3 ay indeksleri."""
+    now = datetime.now(IST_TZ)
+    cur_month_num = now.month  # 1..12
+    cur_month_idx = cur_month_num - 1
+    prev_idx = (cur_month_idx - 1) % 12
+    last3 = [ (prev_idx - 2) % 12, (prev_idx - 1) % 12, prev_idx ]
+    return cur_month_idx, prev_idx, last3, now
+
+def compute_metrics(df: pd.DataFrame):
+    """
+    - Aylık Satış: içinde bulunulan ayın bir önceki ayı
+    - 3 Aylık Satış: önceki 3 ayın ortalaması
+    - YTD Satış (ortalama): S / (içinde bulunulan ay - 1)  (Ocak için S/1)
+    """
+    cur_idx, prev_idx, last3, _ = current_month_info()
+    prev_month_name = MONTHS_EN[prev_idx]
+    last3_names = [MONTHS_EN[i] for i in last3]
+
+    work = df.copy()
+    work["Aylık Satış"] = work[prev_month_name]
+    work["3 Aylık Satış"] = work[last3_names].mean(axis=1, skipna=True)
+
+    denom = max(cur_idx, 1)  # Ocak'ta 0'a bölmeyi engelle
+    work["YTD Satış"] = work["YTD"] / denom
+
+    out = work[["Marka","Model","Aylık Satış","3 Aylık Satış","YTD Satış","YTD","group_id"]].copy()
+    return out, prev_month_name, last3_names, denom
+
+def style_bmw_first(df: pd.DataFrame):
+    """BMW’yi üstte sırala; BMW satırını kalın gösterme styler'la yapılacak."""
+    df = df.copy()
+    df["__bmw__"] = (df["Marka"].str.upper() == "BMW").astype(int)
+    df = df.sort_values(by=["__bmw__","Marka","Model"], ascending=[False, True, True]).drop(columns="__bmw__")
+    return df
+
+def format_int(x):
+    if pd.isna(x):
+        return ""
+    try:
+        return f"{int(round(x)):,}".replace(",", ".")
+    except:
+        return str(x)
+
+# -------------------------------------------------------------
+# UI: Bölüm
+# -------------------------------------------------------------
+st.markdown("## Satış Performansı (Aylık / 3 Aylık / YTD) — Monthly Basis")
+
+# Sadece adı 'monthly basis' içeren dosyaları ara
+monthly_file = _pick_monthly_basis_file(search_dir="data")
+if monthly_file is None:
+    st.warning("`data/` klasöründe adı **'monthly basis'** içeren Excel dosyası (.xlsx/.xlsm) bulunamadı.\nÖrn: `Monthly Basis - Focus Segment Retail Comparision 09-2025.xlsm`")
+    st.stop()
+
+data_df = load_focus_segment_df(monthly_file)
+
+# Hesaplamalar
+calc_df, prev_month_name, last3_names, ytd_denom = compute_metrics(data_df)
+
+# S=0 olanları dışla
+calc_df = calc_df[calc_df["YTD"].fillna(0) != 0].copy()
+
+# Filtre: yalnızca BMW modelleri
+bmw_models = (calc_df.loc[calc_df["Marka"].str.upper() == "BMW", "Model"]
+              .dropna().drop_duplicates().tolist())
+if not bmw_models:
+    st.info("BMW modeli bulunamadı. Lütfen 'monthly basis' dosyasını kontrol edin.")
+    st.stop()
+
+selected_bmw = st.selectbox(
+    "BMW Model Filtresi",
+    options=bmw_models,
+    index=0,
+    help="Bir BMW modeli seçtiğinde, o modelin rakip grubundaki satırlar listelenir."
+)
+
+# Seçilen BMW modelinin grup kimliği
+target_groups = calc_df.loc[
+    (calc_df["Marka"].str.upper() == "BMW") & (calc_df["Model"] == selected_bmw),
+    "group_id"
+].dropna().unique()
+if len(target_groups) == 0:
+    st.warning("Seçilen BMW modeline ait grup bulunamadı.")
+    st.stop()
+
+gid = target_groups[0]
+group_view = calc_df[calc_df["group_id"] == gid].copy()
+
+# Görüntü ve sıralama
+view = group_view[["Marka","Model","Aylık Satış","3 Aylık Satış","YTD Satış"]].copy()
+view = style_bmw_first(view)
+
+# Bilgi notu
+cur_idx, prev_idx, last3, now = current_month_info()
+st.caption(
+    f"Dosya: `{Path(monthly_file).name}` • "
+    f"İçinde bulunulan ay: **{MONTHS_EN[cur_idx]}** • "
+    f"Aylık Satış = **{MONTHS_EN[prev_idx]}** • "
+    f"3 Aylık = {', '.join(MONTHS_EN[i] for i in last3)} • "
+    f"YTD Ortalama bölünen: **{ytd_denom}**"
+)
+
+# Gösterim: BMW satırını kalın yap
+styled = (view.style
+    .apply(lambda s: ["font-weight: 700" if (s.name in view.index and view.loc[s.name, "Marka"].upper()=="BMW") else "" for _ in s], axis=1)
+    .format({"Aylık Satış": format_int, "3 Aylık Satış": format_int, "YTD Satış": format_int})
+)
+
+st.dataframe(styled, use_container_width=True)
+
+# CSV indir
+csv_bytes = view.to_csv(index=False).encode("utf-8")
+st.download_button(
+    "CSV indir (filtrelenmiş)",
+    data=csv_bytes,
+    file_name=f"satis_performansi_{Path(monthly_file).stem.replace(' ','_')}_{selected_bmw.replace(' ','_')}.csv",
+    mime="text/csv"
+)
+# === /Bölüm Sonu ===
