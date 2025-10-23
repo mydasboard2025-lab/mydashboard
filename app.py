@@ -228,11 +228,6 @@ def load_model_lists(perf_path: Path) -> list[str]:
 
 @st.cache_data(show_spinner=False)
 def get_retail_handover_month_only(perf_path: Path, model_name: str, month_abbr: str) -> dict:
-    """
-    Sadece içinde bulunduğumuz ay değerlerini döner:
-      - Retail (month)
-      - Handover (month)
-    """
     out = {"retail_month": None, "handover_month": None}
     for sh, key_month in [
         ("Retail", "retail_month"),
@@ -269,6 +264,83 @@ def get_presold_free(perf_path: Path, model_name: str) -> dict:
         res["free"] = None
     return res
 
+# ================== YENİ: DIO Model (Günlük DIO grafiği) ==================
+MONTHS_EN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+IST_TZ = pytz.timezone("Europe/Istanbul")
+
+@st.cache_data(show_spinner=False)
+def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO model") -> pd.DataFrame | None:
+    """
+    'DIO model' sayfasını header'sız okur.
+    Gün başlıkları E6 hücresinden yatay başlar (1..31),
+    model adları D9'dan itibaren D sütununda.
+    """
+    try:
+        df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
+        return df
+    except Exception:
+        return None
+
+def _find_model_row_in_dio(df_dio: pd.DataFrame, model_name: str) -> int | None:
+    # D sütunu = index 3; veri D9'dan başlıyor => 0-index'te 8
+    col = df_dio.iloc[:, 3].astype(str).str.strip()
+    mask = (col.str.casefold() == model_name.strip().casefold())
+    idx = mask[mask].index
+    return int(idx[0]) if len(idx) else None
+
+def _extract_day_headers(df_dio: pd.DataFrame) -> list[int]:
+    # E6 hücresi gün başlıklarının başladığı yer => satır 6 => index 5, sütun E => index 4
+    headers = df_dio.iloc[5, 4:].tolist()
+    days = []
+    for h in headers:
+        # başlıklar 1..31 veya '1', '01' vb olabilir
+        try:
+            d = int(str(h).strip().split(".")[0])
+            if 1 <= d <= 31:
+                days.append(d)
+            else:
+                break
+        except Exception:
+            break
+    return days
+
+def current_month_info():
+    now = datetime.now(IST_TZ)
+    cur_month_num = now.month
+    cur_month_idx = cur_month_num - 1
+    prev_idx = (cur_month_idx - 1) % 12
+    last3 = [ (prev_idx - 2) % 12, (prev_idx - 1) % 12, prev_idx ]
+    return cur_month_idx, prev_idx, last3, now
+
+def get_dio_timeseries(perf_path: Path, model_name: str):
+    """
+    DIO model sayfasından seçilen modelin gün-özel serisini döner.
+    Gün = 1..today, Değer = ilgili satırdaki E:?? hücreleri.
+    """
+    df_dio = load_dio_sheet(perf_path, "DIO model")
+    if df_dio is None:
+        return None, "DIO model sayfası bulunamadı."
+    row_idx = _find_model_row_in_dio(df_dio, model_name)
+    if row_idx is None:
+        return None, f"'{model_name}' modeli DIO model sayfasında bulunamadı."
+    day_headers = _extract_day_headers(df_dio)
+    if not day_headers:
+        return None, "DIO model sayfasında E6'dan başlayan gün başlıkları okunamadı."
+
+    today_day = datetime.now(IST_TZ).day
+    usable_days = [d for d in day_headers if d <= today_day]
+    # E sütunu index 4, değerler aynı satır (row_idx)
+    vals = df_dio.iloc[row_idx, 4:4+len(usable_days)].tolist()
+
+    # Normalize numeric
+    ser = pd.Series(vals)
+    ser = to_numeric_locale_aware(ser)
+
+    out = pd.DataFrame({"Gün": usable_days, "Değer": ser})
+    # Baştaki/aradaki tamamen boş günler varsa 0 yerine NaN kalsın, grafik yine gösterir.
+    return out, None
+
+# ================== UI: Aylık Performans + Günlük DIO ==================
 def build_monthly_performance_ui(perf_path: Path):
     with st.expander("📊 Model Aylık Performans (Retail / Handover / Presold / Free)", expanded=True):
         if perf_path is None:
@@ -321,7 +393,7 @@ def build_monthly_performance_ui(perf_path: Path):
         rh = get_retail_handover_month_only(perf_path, selected_perf_model, month_abbr)
         pf = get_presold_free(perf_path, selected_perf_model)
 
-        def _fmt(v): 
+        def _fmt(v):
             return "—" if v is None or pd.isna(v) else f"{float(v):,.0f}"
 
         # ---- 4 kutu tek satır ----
@@ -351,6 +423,42 @@ def build_monthly_performance_ui(perf_path: Path):
 
         st.caption(f"Kaynak: {perf_path.name}  •  Ay: {month_abbr}")
 
+        # ---- YENİ: Günlük DIO Grafiği ----
+        st.markdown("### Günlük DIO")
+
+        dio_df, dio_err = get_dio_timeseries(perf_path, selected_perf_model)
+        if dio_err:
+            st.warning(dio_err)
+            return
+
+        if dio_df is None or dio_df["Değer"].isna().all():
+            st.info("Seçilen model için DIO verisi bulunamadı veya tamamen boş.")
+            return
+
+        # Altair ile sütun grafiği + bar üstü etiketler
+        import altair as alt
+        # Koyu mavi: kutu başlık rengi ile uyumlu
+        BAR_COLOR = "#2a4a7a"
+
+        base = alt.Chart(dio_df).encode(
+            x=alt.X("Gün:O", title="Gün"),
+            y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True)),
+            tooltip=[alt.Tooltip("Gün:O"), alt.Tooltip("Değer:Q", format=",.0f")]
+        )
+
+        bars = base.mark_bar(color=BAR_COLOR).properties(height=260)
+
+        labels = base.mark_text(
+            dy=-5,  # barın üstünde
+            fontSize=11,
+            color=BAR_COLOR
+        ).encode(
+            text=alt.Text("Değer:Q", format=",.0f")
+        )
+
+        chart = (bars + labels).resolve_scale(y='shared').properties(title=f"{selected_perf_model} • Günlük DIO")
+        st.altair_chart(chart, use_container_width=True)
+
 # ================== Uygulama Akışı ==================
 def main():
     # 1) Rakip Karşılaştırma
@@ -364,14 +472,14 @@ def main():
 
     st.markdown("---")
 
-    # 2) Aylık Performans Kutucukları (sadece aylık değerler)
+    # 2) Aylık Performans Kutucukları + Günlük DIO
     perf_excel = find_performance_workbook(DATA_DIR)
     build_monthly_performance_ui(perf_excel)
 
 if __name__ == "__main__":
     main()
 
-# === Yeni Bölüm: Satış Performansı Tablosu (Aylık / 3 Aylık / YTD) — Monthly Basis seçimi ===
+# === (Aynen korunur) Yeni Bölüm: Satış Performansı Tablosu (Aylık / 3 Aylık / YTD) — Monthly Basis seçimi ===
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -389,10 +497,6 @@ IST_TZ = pytz.timezone("Europe/Istanbul")
 MONTHS_EN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
 def _pick_monthly_basis_file(search_dir="data"):
-    """
-    Sadece adında 'monthly' ve 'basis' geçen Excel dosyalarını (.xlsx/.xlsm) arar (case-insensitive).
-    Eğer birden fazla varsa, değiştirilme zamanına göre en güncelini seçer.
-    """
     patterns = [
         os.path.join(search_dir, "*monthly*basis*.xlsx"),
         os.path.join(search_dir, "*monthly*basis*.xlsm"),
@@ -408,12 +512,6 @@ def _pick_monthly_basis_file(search_dir="data"):
 
 @st.cache_data(show_spinner=False)
 def load_focus_segment_df(file_path: str, sheet_name: str = "Monthly Basis"):
-    """
-    Excel'de 'Monthly Basis' sayfasından D:S aralığını okur.
-    - Veriler 10. satırdan itibaren olduğu için skiprows=9 kullanıyoruz.
-    - Kolon isimlerini sabit veriyoruz: D=Marka, E=Model, G..R=Jan..Dec, S=YTD
-    """
-    # 'Monthly Basis' sheet gerçekten var mı kontrol et
     xls = pd.ExcelFile(file_path, engine="openpyxl" if file_path.lower().endswith((".xlsx",".xlsm",".xltx",".xltm")) else None)
     available_sheets = [s.lower() for s in xls.sheet_names]
     if sheet_name.lower() not in available_sheets:
@@ -425,18 +523,17 @@ def load_focus_segment_df(file_path: str, sheet_name: str = "Monthly Basis"):
         ["D","E"] +
         [chr(c) for c in range(ord("G"), ord("R")+1)] +  # G..R
         ["S"]
-    )  # => ['D','E','G','H','I','J','K','L','M','N','O','P','Q','R','S']
+    )
     
     df = pd.read_excel(
         xls,
         sheet_name=sheet_name,
         header=None,
-        skiprows=9,                 # 10. satırdan veri
-        usecols=",".join(usecols_letters),  # <-- kritik düzeltme
+        skiprows=9,
+        usecols=",".join(usecols_letters),
     )
     df.columns = col_names
 
-    # String sayıları normalize et (1.234,56 → 1234.56)
     def to_num(x):
         if isinstance(x, str):
             x = x.strip().replace(".", "").replace(",", ".")
@@ -446,22 +543,19 @@ def load_focus_segment_df(file_path: str, sheet_name: str = "Monthly Basis"):
     for c in MONTHS_EN + ["YTD"]:
         df[c] = df[c].apply(to_num)
 
-    # Grup ID üretimi: D sütunundaki boşluklar grup ayırıcıdır
     group_id = []
     g = -1
     for _, row in df.iterrows():
         marka = row["Marka"]
         if pd.isna(marka) or (isinstance(marka, str) and marka.strip() == ""):
-            # separator satır (grup arası boşluk)
             group_id.append(np.nan)
-            g += 1  # bir sonraki dolu satır yeni gruba girecek
+            g += 1
         else:
             if len(group_id) == 0 or pd.isna(group_id[-1]):
                 g = g if g >= 0 else 0
             group_id.append(g)
     df["group_id"] = group_id
 
-    # Sadece dolu satırlar (separator'lar hariç)
     data_df = df[~df["Marka"].isna()].copy()
     data_df["Marka"] = data_df["Marka"].astype(str).str.strip()
     data_df["Model"] = data_df["Model"].astype(str).str.strip()
@@ -469,7 +563,6 @@ def load_focus_segment_df(file_path: str, sheet_name: str = "Monthly Basis"):
     return data_df
 
 def current_month_info():
-    """İstanbul saatine göre ay bilgisi ve önceki ay/son 3 ay indeksleri."""
     now = datetime.now(IST_TZ)
     cur_month_num = now.month  # 1..12
     cur_month_idx = cur_month_num - 1
@@ -478,11 +571,6 @@ def current_month_info():
     return cur_month_idx, prev_idx, last3, now
 
 def compute_metrics(df: pd.DataFrame):
-    """
-    - Aylık Satış: içinde bulunulan ayın bir önceki ayı
-    - 3 Aylık Satış: önceki 3 ayın ortalaması
-    - YTD Satış (ortalama): S / (içinde bulunulan ay - 1)  (Ocak için S/1)
-    """
     cur_idx, prev_idx, last3, _ = current_month_info()
     prev_month_name = MONTHS_EN[prev_idx]
     last3_names = [MONTHS_EN[i] for i in last3]
@@ -498,7 +586,6 @@ def compute_metrics(df: pd.DataFrame):
     return out, prev_month_name, last3_names, denom
 
 def style_bmw_first(df: pd.DataFrame):
-    """BMW’yi üstte sırala; BMW satırını kalın gösterme styler'la yapılacak."""
     df = df.copy()
     df["__bmw__"] = (df["Marka"].str.upper() == "BMW").astype(int)
     df = df.sort_values(by=["__bmw__","Marka","Model"], ascending=[False, True, True]).drop(columns="__bmw__")
@@ -517,26 +604,21 @@ def format_int(x):
 # -------------------------------------------------------------
 st.markdown("## Satış Performansı (Aylık / 3 Aylık / YTD) — Monthly Basis")
 
-# Sadece adı 'monthly basis' içeren dosyaları ara
 monthly_file = _pick_monthly_basis_file(search_dir="data")
 if monthly_file is None:
     st.warning("`data/` klasöründe adı **'monthly basis'** içeren Excel dosyası (.xlsx/.xlsm) bulunamadı.\nÖrn: `Monthly Basis - Focus Segment Retail Comparision 09-2025.xlsm`")
     st.stop()
 
-# Veriyi 'Monthly Basis' sayfasından yükle
 try:
     data_df = load_focus_segment_df(monthly_file, sheet_name="Monthly Basis")
 except ValueError as e:
     st.error(str(e))
     st.stop()
 
-# Hesaplamalar
 calc_df, prev_month_name, last3_names, ytd_denom = compute_metrics(data_df)
 
-# S=0 olanları dışla
 calc_df = calc_df[calc_df["YTD"].fillna(0) != 0].copy()
 
-# Filtre: yalnızca BMW modelleri
 bmw_models = (calc_df.loc[calc_df["Marka"].str.upper() == "BMW", "Model"]
               .dropna().drop_duplicates().tolist())
 if not bmw_models:
@@ -550,7 +632,6 @@ selected_bmw = st.selectbox(
     help="Bir BMW modeli seçtiğinde, o modelin rakip grubundaki satırlar listelenir."
 )
 
-# Seçilen BMW modelinin grup kimliği
 target_groups = calc_df.loc[
     (calc_df["Marka"].str.upper() == "BMW") & (calc_df["Model"] == selected_bmw),
     "group_id"
@@ -562,11 +643,9 @@ if len(target_groups) == 0:
 gid = target_groups[0]
 group_view = calc_df[calc_df["group_id"] == gid].copy()
 
-# Görüntü ve sıralama
 view = group_view[["Marka","Model","Aylık Satış","3 Aylık Satış","YTD Satış"]].copy()
 view = style_bmw_first(view)
 
-# Bilgi notu
 cur_idx, prev_idx, last3, now = current_month_info()
 st.caption(
     f"Dosya: `{Path(monthly_file).name}` • "
@@ -577,7 +656,6 @@ st.caption(
     f"YTD Ortalama bölünen: **{ytd_denom}**"
 )
 
-# Gösterim: BMW satırını kalın yap
 styled = (view.style
     .apply(lambda s: ["font-weight: 700" if (s.name in view.index and view.loc[s.name, "Marka"].upper()=="BMW") else "" for _ in s], axis=1)
     .format({"Aylık Satış": format_int, "3 Aylık Satış": format_int, "YTD Satış": format_int})
@@ -585,7 +663,6 @@ styled = (view.style
 
 st.dataframe(styled, use_container_width=True)
 
-# CSV indir
 csv_bytes = view.to_csv(index=False).encode("utf-8")
 st.download_button(
     "CSV indir (filtrelenmiş)",
