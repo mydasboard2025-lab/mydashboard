@@ -237,7 +237,7 @@ def get_retail_handover_month_only(perf_path: Path, model_name: str, month_abbr:
     for sh, key_month in [
         ("Retail", "retail_month"),
         ("Handover Model", "handover_month"),
-    ]]:
+    ]:
         df = _read_sheet(perf_path, sh)
         r_idx = _row_index_for_model(df, model_name, model_col_idx=3)
         if r_idx is None:
