@@ -16,7 +16,7 @@ DATA_DIR = Path("data")
 
 # Dosya isimleri
 PRICE_FILE_NAME = "Fiyat Karşılaştırması_v4.xlsx"      # Rakip karşılaştırma
-PERF_FILE_NAME  = "Model aylık performans.xlsx"        # Retail/Handover/Presold/Free
+PERF_FILE_NAME  = "Model aylık performans.xlsx"        # Retail/Handover/Presold/Free + DIO Model + Monthly Basis
 
 # Ortak sabitler
 IST_TZ = pytz.timezone("Europe/Istanbul")
@@ -163,8 +163,8 @@ def build_price_compare_ui(df_raw: pd.DataFrame, source_path: Path):
     st.dataframe(styled, use_container_width=True, hide_index=True)
     st.caption(f"Kaynak: {source_path.name}")
 
-# ================== Aylık Performans (Retail/Handover/Presold/Free + Günlük DIO) ==================
-REQUIRED_SHEETS = {"Retail", "Handover Model", "Presold"}
+# ================== Aylık Performans (Retail/Handover/Presold/Free + Günlük DIO Model) ==================
+REQUIRED_SHEETS = {"Retail", "Handover Model", "Presold", "DIO Model", "Monthly Basis"}
 
 def find_performance_workbook(data_dir: Path) -> Path | None:
     if not data_dir.exists():
@@ -191,7 +191,8 @@ def find_performance_workbook(data_dir: Path) -> Path | None:
                 return f
         except Exception:
             continue
-    return None
+    # Eğer tüm required sheetler yoksa yine de ilk uygun dosyayı dön
+    return files[0] if files else None
 
 def _read_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
     return pd.read_excel(path, sheet_name=sheet_name, header=None, engine="openpyxl")
@@ -268,7 +269,7 @@ def get_presold_free(perf_path: Path, model_name: str) -> dict:
         res["free"] = None
     return res
 
-# ---------- DIO Model (Günlük DIO grafiği) ----------
+# ---------- DIO Model (Günlük DIO Model grafiği + toplam) ----------
 @st.cache_data(show_spinner=False)
 def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO Model") -> pd.DataFrame | None:
     try:
@@ -284,7 +285,11 @@ def _find_model_row_in_dio(df_dio: pd.DataFrame, model_name: str) -> int | None:
     return int(idx[0]) if len(idx) else None
 
 def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp], int]:
-    headers = df_dio.iloc[5, 4:].tolist()  # 6. satır, E sütunundan sağa
+    """
+    6. satır (index 5), E sütunundan (index 4) itibaren tarih başlıklarını oku.
+    İlk boş/bozulmuş hücrede dur ve kaç tarih olduğunu (ncols) döndür.
+    """
+    headers = df_dio.iloc[5, 4:].tolist()
     dates: list[pd.Timestamp] = []
     ncols = 0
     for h in headers:
@@ -297,27 +302,37 @@ def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp]
         ncols += 1
     return dates, ncols
 
-def get_dio_timeseries(perf_path: Path, model_name: str):
+def get_dio_timeseries_and_total(perf_path: Path, model_name: str):
+    """
+    Döner:
+      - df: TarihLabel (01.10), Tarih (datetime), Değer (float, boş->0)
+      - toplam: 6. satırdaki başlıklar bittiği ilk boş hücrenin aynı SÜTUNUNDA, ilgili model satırındaki değer
+    """
     df_dio = load_dio_sheet(perf_path, "DIO Model")
     if df_dio is None:
-        return None, "DIO Model sayfası bulunamadı."
+        return None, None, "DIO Model sayfası bulunamadı."
     row_idx = _find_model_row_in_dio(df_dio, model_name)
     if row_idx is None:
-        return None, f"'{model_name}' modeli DIO Model sayfasında bulunamadı."
+        return None, None, f"'{model_name}' modeli DIO Model sayfasında bulunamadı."
 
     dates, ncols = _extract_day_headers_dates(df_dio)
     if ncols == 0:
-        return None, "DIO Model sayfasında E6'dan başlayan tarih başlıkları okunamadı."
+        return None, None, "DIO Model sayfasında E6'dan başlayan tarih başlıkları okunamadı."
 
-    vals_raw = df_dio.iloc[row_idx, 4:4+ncols].tolist()  # E sütunundan ncols kadar
-    vals_num = to_numeric_locale_aware(pd.Series(vals_raw)).fillna(0)
+    # Günlük değerler: E sütunundan ncols kadar
+    vals_raw = df_dio.iloc[row_idx, 4:4+ncols].tolist()
+    vals_num = to_numeric_locale_aware(pd.Series(vals_raw)).fillna(0).astype(float)
 
-    out = pd.DataFrame({"Tarih": dates, "Değer": vals_num.astype(float)})
-    # EKSEN İÇİN LABEL (kategori): 01.10, 02.10, ...
+    out = pd.DataFrame({"Tarih": dates, "Değer": vals_num})
     out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
-    # Orijinal sıralamayı korumak için kategorik sırayı sabitle
     out["TarihLabel"] = pd.Categorical(out["TarihLabel"], categories=out["TarihLabel"].tolist(), ordered=True)
-    return out, None
+
+    # Toplam: 6. satırda günler bittiği ilk boş hücrenin sütunu = 4 + ncols
+    total_cell = df_dio.iat[row_idx, 4 + ncols] if (4 + ncols) < df_dio.shape[1] else None
+    toplam = to_numeric_locale_aware(pd.Series([total_cell])).iloc[0]
+    toplam = 0 if pd.isna(toplam) else float(toplam)
+
+    return out, toplam, None
 
 def build_monthly_performance_ui(perf_path: Path):
     with st.expander("📊 Model Aylık Performans (Retail / Handover / Presold / Free)", expanded=True):
@@ -364,6 +379,7 @@ def build_monthly_performance_ui(perf_path: Path):
         def _fmt(v):
             return "—" if v is None or pd.isna(v) else f"{float(v):,.0f}"
 
+        # ---- 4 kutu tek satır ----
         st.markdown(
             f"""
             <div class="kv-row">
@@ -378,35 +394,31 @@ def build_monthly_performance_ui(perf_path: Path):
 
         st.caption(f"Kaynak: {perf_path.name}  •  Ay: {month_abbr}")
 
-        # ---- Günlük DIO Grafiği ----
-        st.markdown("### Günlük DIO")
-        dio_df, dio_err = get_dio_timeseries(perf_path, selected_perf_model)
+        # ---- Günlük DIO Model Grafiği + Toplam ----
+        st.markdown("### Günlük DIO Model")
+        dio_df, dio_total, dio_err = get_dio_timeseries_and_total(perf_path, selected_perf_model)
         if dio_err:
             st.warning(dio_err)
         else:
             if dio_df is None or len(dio_df) == 0:
-                st.info("Seçilen model için DIO verisi bulunamadı.")
+                st.info("Seçilen model için Günlük DIO Model verisi bulunamadı.")
             else:
                 import altair as alt
                 BAR_COLOR = "#2a4a7a"
 
-                # X ekseni kategori: her güne tek etiket
+                # Başlıkta toplamı göster
+                baslik = f"{selected_perf_model} • Günlük DIO Model • Toplam: {dio_total:,.0f}".replace(",", ".")
+
                 base = alt.Chart(dio_df).encode(
                     x=alt.X("TarihLabel:N", title="Gün", sort=list(dio_df["TarihLabel"].astype(str))),
                     y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True, zero=True)),
                     tooltip=[alt.Tooltip("Tarih:T", title="Tarih", format="%d.%m.%Y"),
                              alt.Tooltip("Değer:Q", format=",.0f")]
                 )
-
                 bars = base.mark_bar(color=BAR_COLOR).properties(height=260)
-
-                labels = base.mark_text(
-                    dy=-5, fontSize=11, color=BAR_COLOR
-                ).encode(text=alt.Text("Değer:Q", format=",.0f"))
-
-                chart = (bars + labels).resolve_scale(y='shared').properties(
-                    title=f"{selected_perf_model} • Günlük DIO"
-                )
+                labels = base.mark_text(dy=-5, fontSize=11, color=BAR_COLOR)\
+                              .encode(text=alt.Text("Değer:Q", format=",.0f"))
+                chart = (bars + labels).resolve_scale(y='shared').properties(title=baslik)
                 st.altair_chart(chart, use_container_width=True)
 
 # ================== Uygulama Akışı ==================
@@ -422,14 +434,14 @@ def main():
 
     st.markdown("---")
 
-    # 2) Aylık Performans Kutucukları + Günlük DIO
+    # 2) Aylık Performans Kutucukları + Günlük DIO Model
     perf_excel = find_performance_workbook(DATA_DIR)
     build_monthly_performance_ui(perf_excel)
 
 if __name__ == "__main__":
     main()
 
-# === Satış Performansı Tablosu (Aylık / 3 Aylık / YTD) — Monthly Basis ===
+# === ODMD Sonuçları (Aylık / 3 Aylık / YTD) — Monthly Basis (aynı dosya içinde) ===
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -437,38 +449,31 @@ from pathlib import Path
 from datetime import datetime
 import pytz
 import re
-import glob
-import os
 
 IST_TZ = pytz.timezone("Europe/Istanbul")
 MONTHS_EN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
-def _pick_monthly_basis_file(search_dir="data"):
-    patterns = [
-        os.path.join(search_dir, "*monthly*basis*.xlsx"),
-        os.path.join(search_dir, "*monthly*basis*.xlsm"),
-        os.path.join(search_dir, "*Monthly*Basis*.xlsx"),
-        os.path.join(search_dir, "*Monthly*Basis*.xlsm"),
-    ]
-    candidates = []
-    for pat in patterns:
-        candidates.extend(glob.glob(pat))
-    candidates = list({Path(p).resolve() for p in candidates})
-    candidates = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
-    return str(candidates[0]) if candidates else None
-
 @st.cache_data(show_spinner=False)
-def load_focus_segment_df(file_path: str, sheet_name: str = "Monthly Basis"):
-    xls = pd.ExcelFile(file_path, engine="openpyxl" if file_path.lower().endswith((".xlsx",".xlsm",".xltx",".xltm")) else None)
-    available_sheets = [s.lower() for s in xls.sheet_names]
-    if sheet_name.lower() not in available_sheets:
-        raise ValueError(f"'{sheet_name}' sayfası bulunamadı. Mevcut sayfalar: {xls.sheet_names}")
+def load_focus_segment_df_from_perf(perf_path: Path, sheet_name: str = "Monthly Basis"):
+    """
+    'Model aylık performans.xlsx' içerisindeki 'Monthly Basis' sayfasından
+    D:S aralığını (D=Marka, E=Model, G..R=Jan..Dec, S=YTD) okur.
+    """
+    if perf_path is None or not perf_path.exists():
+        raise ValueError("Model aylık performans dosyası bulunamadı.")
+    xls = pd.ExcelFile(perf_path, engine="openpyxl")
+    if sheet_name not in xls.sheet_names:
+        raise ValueError(f"'{sheet_name}' sayfası dosyada yok. Mevcut sayfalar: {xls.sheet_names}")
 
-    col_names = ["Marka","Model"] + MONTHS_EN + ["YTD"]
+    col_names = ["Marka","Model"] + MONTHS_EN + ["YTD"]  # 15 kolon
+    usecols_letters = ["D","E"] + [chr(c) for c in range(ord("G"), ord("R")+1)] + ["S"]
 
-    usecols_letters = (["D","E"] + [chr(c) for c in range(ord("G"), ord("R")+1)] + ["S"])
     df = pd.read_excel(
-        xls, sheet_name=sheet_name, header=None, skiprows=9, usecols=",".join(usecols_letters),
+        xls,
+        sheet_name=sheet_name,
+        header=None,
+        skiprows=9,
+        usecols=",".join(usecols_letters),
     )
     df.columns = col_names
 
@@ -481,6 +486,7 @@ def load_focus_segment_df(file_path: str, sheet_name: str = "Monthly Basis"):
     for c in MONTHS_EN + ["YTD"]:
         df[c] = df[c].apply(to_num)
 
+    # Grup ID (D sütunundaki boş satırlar grup ayırıcısı)
     group_id = []
     g = -1
     for _, row in df.iterrows():
@@ -515,7 +521,7 @@ def compute_metrics(df: pd.DataFrame):
     work["Aylık Satış"] = work[prev_month_name]
     work["3 Aylık Satış"] = work[last3_names].mean(axis=1, skipna=True)
 
-    denom = max(cur_idx, 1)  # Ocak'ta 0'a bölme engeli
+    denom = max(cur_idx, 1)  # Ocak'ta 0'a bölmeyi engelle
     work["YTD Satış"] = work["YTD"] / denom
 
     out = work[["Marka","Model","Aylık Satış","3 Aylık Satış","YTD Satış","YTD","group_id"]].copy()
@@ -528,72 +534,70 @@ def style_bmw_first(df: pd.DataFrame):
     return df
 
 def format_int(x):
-    if pd.isna(x): return ""
-    try: return f"{int(round(x)):,}".replace(",", ".")
-    except: return str(x)
+    if pd.isna(x):
+        return ""
+    try:
+        return f"{int(round(x)):,}".replace(",", ".")
+    except:
+        return str(x)
 
-# ---- UI: Bölüm ----
-st.markdown("## Satış Performansı (Aylık / 3 Aylık / YTD) — Monthly Basis")
+# ---------------- UI: ODMD Sonuçları ----------------
+st.markdown("## ODMD Sonuçları")
 
-monthly_file = _pick_monthly_basis_file(search_dir="data")
-if monthly_file is None:
-    st.warning("`data/` klasöründe adı **'monthly basis'** içeren Excel dosyası (.xlsx/.xlsm) bulunamadı.\nÖrn: `Monthly Basis - Focus Segment Retail Comparision 09-2025.xlsm`")
-    st.stop()
-
+perf_excel_for_mb = find_performance_workbook(DATA_DIR)
 try:
-    data_df = load_focus_segment_df(monthly_file, sheet_name="Monthly Basis")
+    data_df = load_focus_segment_df_from_perf(perf_excel_for_mb, sheet_name="Monthly Basis")
 except ValueError as e:
-    st.error(str(e))
-    st.stop()
+    st.warning(str(e))
+else:
+    calc_df, prev_month_name, last3_names, ytd_denom = compute_metrics(data_df)
+    calc_df = calc_df[calc_df["YTD"].fillna(0) != 0].copy()
 
-calc_df, prev_month_name, last3_names, ytd_denom = compute_metrics(data_df)
-calc_df = calc_df[calc_df["YTD"].fillna(0) != 0].copy()
+    bmw_models = (calc_df.loc[calc_df["Marka"].str.upper() == "BMW", "Model"]
+                  .dropna().drop_duplicates().tolist())
+    if bmw_models:
+        selected_bmw = st.selectbox(
+            "BMW Model Filtresi",
+            options=bmw_models,
+            index=0,
+            help="Bir BMW modeli seçtiğinde, o modelin rakip grubundaki satırlar listelenir.",
+            key="odmd_bmw_filter"
+        )
 
-bmw_models = (calc_df.loc[calc_df["Marka"].str.upper() == "BMW", "Model"].dropna().drop_duplicates().tolist())
-if not bmw_models:
-    st.info("BMW modeli bulunamadı. Lütfen 'Monthly Basis' sayfasındaki verileri kontrol edin.")
-    st.stop()
+        target_groups = calc_df.loc[
+            (calc_df["Marka"].str.upper() == "BMW") & (calc_df["Model"] == selected_bmw),
+            "group_id"
+        ].dropna().unique()
 
-selected_bmw = st.selectbox(
-    "BMW Model Filtresi",
-    options=bmw_models,
-    index=0,
-    help="Bir BMW modeli seçtiğinde, o modelin rakip grubundaki satırlar listelenir."
-)
+        if len(target_groups) == 0:
+            st.info("Seçilen BMW modeline ait grup bulunamadı.")
+        else:
+            gid = target_groups[0]
+            group_view = calc_df[calc_df["group_id"] == gid].copy()
+            view = group_view[["Marka","Model","Aylık Satış","3 Aylık Satış","YTD Satış"]].copy()
+            view = style_bmw_first(view)
 
-target_groups = calc_df.loc[
-    (calc_df["Marka"].str.upper() == "BMW") & (calc_df["Model"] == selected_bmw),
-    "group_id"
-].dropna().unique()
-if len(target_groups) == 0:
-    st.warning("Seçilen BMW modeline ait grup bulunamadı.")
-    st.stop()
+            cur_idx, prev_idx, last3, now = current_month_info()
+            st.caption(
+                f"Kaynak: {Path(perf_excel_for_mb).name} • Sayfa: 'Monthly Basis' • "
+                f"İçinde bulunulan ay: **{MONTHS_EN[cur_idx]}** • "
+                f"Aylık Satış = **{MONTHS_EN[prev_idx]}** • "
+                f"3 Aylık = {', '.join(MONTHS_EN[i] for i in last3)} • "
+                f"YTD Ortalama bölünen: **{ytd_denom}**"
+            )
 
-gid = target_groups[0]
-group_view = calc_df[calc_df["group_id"] == gid].copy()
+            styled = (view.style
+                .apply(lambda s: ["font-weight: 700" if (s.name in view.index and view.loc[s.name, 'Marka'].upper()=='BMW') else "" for _ in s], axis=1)
+                .format({"Aylık Satış": format_int, "3 Aylık Satış": format_int, "YTD Satış": format_int})
+            )
+            st.dataframe(styled, use_container_width=True)
 
-view = group_view[["Marka","Model","Aylık Satış","3 Aylık Satış","YTD Satış"]].copy()
-view = style_bmw_first(view)
-
-cur_idx, prev_idx, last3, now = current_month_info()
-st.caption(
-    f"Dosya: `{Path(monthly_file).name}` • Sayfa: 'Monthly Basis' • "
-    f"İçinde bulunulan ay: **{MONTHS_EN[cur_idx]}** • "
-    f"Aylık Satış = **{MONTHS_EN[prev_idx]}** • "
-    f"3 Aylık = {', '.join(MONTHS_EN[i] for i in last3)} • "
-    f"YTD Ortalama bölünen: **{ytd_denom}**"
-)
-
-styled = (view.style
-    .apply(lambda s: ["font-weight: 700" if (s.name in view.index and view.loc[s.name, "Marka"].upper()=="BMW") else "" for _ in s], axis=1)
-    .format({"Aylık Satış": format_int, "3 Aylık Satış": format_int, "YTD Satış": format_int})
-)
-st.dataframe(styled, use_container_width=True)
-
-csv_bytes = view.to_csv(index=False).encode("utf-8")
-st.download_button(
-    "CSV indir (filtrelenmiş)",
-    data=csv_bytes,
-    file_name=f"satis_performansi_{Path(monthly_file).stem.replace(' ','_')}_{selected_bmw.replace(' ','_')}.csv",
-    mime="text/csv"
-)
+            csv_bytes = view.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "CSV indir (filtrelenmiş)",
+                data=csv_bytes,
+                file_name=f"odmd_sonuclari_{Path(perf_excel_for_mb).stem.replace(' ','_')}_{selected_bmw.replace(' ','_')}.csv",
+                mime="text/csv"
+            )
+    else:
+        st.info("BMW modeli bulunamadı. Lütfen 'Monthly Basis' sayfasındaki verileri kontrol edin.")
