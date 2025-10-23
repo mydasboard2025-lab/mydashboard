@@ -371,10 +371,16 @@ def main():
 if __name__ == "__main__":
     main()
 
-
-
 # === Yeni Bölüm: Satış Performansı Tablosu (Aylık / 3 Aylık / YTD) — Monthly Basis seçimi ===
-
+import pandas as pd
+import numpy as np
+import streamlit as st
+from pathlib import Path
+from datetime import datetime
+import pytz
+import re
+import glob
+import os
 
 # -------------------------------------------------------------
 # Yardımcılar
@@ -385,7 +391,7 @@ MONTHS_EN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","
 def _pick_monthly_basis_file(search_dir="data"):
     """
     Sadece adında 'monthly' ve 'basis' geçen Excel dosyalarını (.xlsx/.xlsm) arar (case-insensitive).
-    Eğer birden fazla varsa, dosya değiştirilme zamanına göre en güncelini seçer.
+    Eğer birden fazla varsa, değiştirilme zamanına göre en güncelini seçer.
     """
     patterns = [
         os.path.join(search_dir, "*monthly*basis*.xlsx"),
@@ -396,26 +402,30 @@ def _pick_monthly_basis_file(search_dir="data"):
     candidates = []
     for pat in patterns:
         candidates.extend(glob.glob(pat))
-    # unique & sort by mtime desc
     candidates = list({Path(p).resolve() for p in candidates})
     candidates = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
     return str(candidates[0]) if candidates else None
 
 @st.cache_data(show_spinner=False)
-def load_focus_segment_df(file_path: str, sheet_name=0):
+def load_focus_segment_df(file_path: str, sheet_name: str = "Monthly Basis"):
     """
-    Excel'den D:S aralığını okur.
+    Excel'de 'Monthly Basis' sayfasından D:S aralığını okur.
     - Veriler 10. satırdan itibaren olduğu için skiprows=9 kullanıyoruz.
     - Kolon isimlerini sabit veriyoruz: D=Marka, E=Model, G..R=Jan..Dec, S=YTD
     """
+    # 'Monthly Basis' sheet gerçekten var mı kontrol et
+    xls = pd.ExcelFile(file_path, engine="openpyxl" if file_path.lower().endswith((".xlsx",".xlsm",".xltx",".xltm")) else None)
+    available_sheets = [s.lower() for s in xls.sheet_names]
+    if sheet_name.lower() not in available_sheets:
+        raise ValueError(f"'{sheet_name}' sayfası bulunamadı. Mevcut sayfalar: {xls.sheet_names}")
+
     col_names = ["Marka","Model"] + MONTHS_EN + ["YTD"]
     df = pd.read_excel(
-        file_path,
+        xls,
         sheet_name=sheet_name,
         header=None,
         skiprows=9,          # 10. satırdan itibaren veri
         usecols="D:S",       # D..S
-        engine="openpyxl" if file_path.lower().endswith((".xlsx",".xlsm",".xltx",".xltm")) else None
     )
     df.columns = col_names
 
@@ -435,8 +445,9 @@ def load_focus_segment_df(file_path: str, sheet_name=0):
     for _, row in df.iterrows():
         marka = row["Marka"]
         if pd.isna(marka) or (isinstance(marka, str) and marka.strip() == ""):
-            g += 1
-            group_id.append(np.nan)   # separator satır
+            # separator satır (grup arası boşluk)
+            group_id.append(np.nan)
+            g += 1  # bir sonraki dolu satır yeni gruba girecek
         else:
             if len(group_id) == 0 or pd.isna(group_id[-1]):
                 g = g if g >= 0 else 0
@@ -505,7 +516,12 @@ if monthly_file is None:
     st.warning("`data/` klasöründe adı **'monthly basis'** içeren Excel dosyası (.xlsx/.xlsm) bulunamadı.\nÖrn: `Monthly Basis - Focus Segment Retail Comparision 09-2025.xlsm`")
     st.stop()
 
-data_df = load_focus_segment_df(monthly_file)
+# Veriyi 'Monthly Basis' sayfasından yükle
+try:
+    data_df = load_focus_segment_df(monthly_file, sheet_name="Monthly Basis")
+except ValueError as e:
+    st.error(str(e))
+    st.stop()
 
 # Hesaplamalar
 calc_df, prev_month_name, last3_names, ytd_denom = compute_metrics(data_df)
@@ -517,7 +533,7 @@ calc_df = calc_df[calc_df["YTD"].fillna(0) != 0].copy()
 bmw_models = (calc_df.loc[calc_df["Marka"].str.upper() == "BMW", "Model"]
               .dropna().drop_duplicates().tolist())
 if not bmw_models:
-    st.info("BMW modeli bulunamadı. Lütfen 'monthly basis' dosyasını kontrol edin.")
+    st.info("BMW modeli bulunamadı. Lütfen 'Monthly Basis' sayfasındaki verileri kontrol edin.")
     st.stop()
 
 selected_bmw = st.selectbox(
@@ -547,6 +563,7 @@ view = style_bmw_first(view)
 cur_idx, prev_idx, last3, now = current_month_info()
 st.caption(
     f"Dosya: `{Path(monthly_file).name}` • "
+    f"Sayfa: 'Monthly Basis' • "
     f"İçinde bulunulan ay: **{MONTHS_EN[cur_idx]}** • "
     f"Aylık Satış = **{MONTHS_EN[prev_idx]}** • "
     f"3 Aylık = {', '.join(MONTHS_EN[i] for i in last3)} • "
