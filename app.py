@@ -57,6 +57,87 @@ def fmt_numeric(df: pd.DataFrame) -> pd.DataFrame:
                 conv = to_numeric_locale_aware(df[c])
             df[c] = conv
     return df
+def _find_series_for_model(perf_path: Path, model_name: str, sheet_name: str = "Series") -> str | None:
+    """
+    'Series' sayfasında model adını satır genelinde arar, bulunan satırın B sütunundaki seri adını döndürür.
+    B sütununda seri olduğu varsayımı ile çalışır.
+    """
+    try:
+        df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
+    except Exception:
+        return None
+
+    # Satırda herhangi bir hücre model adına eşitse o satırın B sütununu (index=1) al
+    model_cf = str(model_name).strip().casefold()
+    for i in range(df.shape[0]):
+        row_vals = df.iloc[i, :].astype(str).str.strip().str.casefold()
+        if (row_vals == model_cf).any():
+            val = df.iat[i, 1]  # B sütunu
+            return None if pd.isna(val) else str(val).strip()
+    return None
+
+
+def _get_showroom_kpis(perf_path: Path, series_name: str, sheet_name: str = "BMW Showroom Seri Bazlı"):
+    """
+    'BMW Showroom Seri Bazlı' sayfasında B sütununda seri adını bulur ve:
+      Walk-in:  K (bu ay), O (önceki ay)
+      Test:     L (bu ay), Q (önceki ay)
+    değerlerini döndürür.
+    """
+    try:
+        df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
+    except Exception:
+        return {"walk_cur": None, "walk_prev": None, "test_cur": None, "test_prev": None}
+
+    # Seri isimleri B7'den aşağı: yine de güvenli olmak için tüm B sütununu tara
+    colB = df.iloc[:, 1].astype(str).str.strip()
+    mask = colB.str.casefold() == str(series_name).strip().casefold()
+    idx = mask[mask].index.tolist()
+    if not idx:
+        return {"walk_cur": None, "walk_prev": None, "test_cur": None, "test_prev": None}
+
+    r = idx[0]
+    def _num(x):
+        return to_numeric_locale_aware(pd.Series([x])).iloc[0]
+
+    vals = {
+        "walk_cur": _num(df.iat[r, 10]) if 10 < df.shape[1] else pd.NA,  # K
+        "walk_prev": _num(df.iat[r, 14]) if 14 < df.shape[1] else pd.NA, # O
+        "test_cur": _num(df.iat[r, 11]) if 11 < df.shape[1] else pd.NA,  # L
+        "test_prev": _num(df.iat[r, 16]) if 16 < df.shape[1] else pd.NA, # Q
+    }
+
+    # NaN -> None
+    for k,v in list(vals.items()):
+        vals[k] = None if pd.isna(v) else float(v)
+    return vals
+
+
+def _format_kpi_box(title: str, cur: float | None, prev: float | None) -> str:
+    """
+    Walk-in/Test Sürüşü kutusu için HTML döndürür.
+    Renk: artış yeşil, azalış kırmızı. prev yoksa değişim gizlenir.
+    """
+    def fmt_int(x):
+        return "—" if x is None else f"{x:,.0f}".replace(",", ".")
+
+    delta_html = ""
+    if (cur is not None) and (prev is not None) and (prev != 0):
+        delta = (cur - prev) / prev
+        cls = "delta-pos" if delta >= 0 else "delta-neg"
+        sign = "+" if delta >= 0 else ""
+        delta_html = f'<div class="kv-delta {cls}">{sign}{delta:.0%}</div><div class="kv-sub">vs önceki ay ({fmt_int(prev)})</div>'
+    elif prev is not None:
+        # prev var ama oran hesaplanamıyorsa
+        delta_html = f'<div class="kv-sub">vs önceki ay ({fmt_int(prev)})</div>'
+
+    return f"""
+    <div class="kv-box">
+      <div class="kv-title">{title}</div>
+      <div class="kv-value">{fmt_int(cur)}</div>
+      {delta_html}
+    </div>
+    """
 
 # ================== Rakip Karşılaştırma ==================
 def find_price_excel(data_dir: Path) -> Path | None:
@@ -373,6 +454,15 @@ def build_monthly_performance_ui(perf_path: Path):
         .kv-value { font-size:22px; font-weight:700; }
         </style>
         """, unsafe_allow_html=True)
+        st.markdown("""
+            <style>
+            .kv-sub { font-size:12px; color:#5e738f; margin-top:4px; }
+            .kv-delta { display:inline-block; font-weight:700; margin-top:4px; margin-right:6px; }
+            .delta-pos { color:#0f9d58; }   /* yeşil */
+            .delta-neg { color:#d93025; }   /* kırmızı */
+            </style>
+            """, unsafe_allow_html=True)
+
 
         ist_tz = zoneinfo.ZoneInfo("Europe/Istanbul")
         month_abbr = datetime.now(ist_tz).strftime("%b")
@@ -407,8 +497,26 @@ def build_monthly_performance_ui(perf_path: Path):
             """,
             unsafe_allow_html=True
         )
-
+        
         st.caption(f"Kaynak: {perf_path.name}  •  Ay: {month_abbr}")
+
+        
+                # ---- Walk-in & Test Sürüşü (Series -> BMW Showroom Seri Bazlı) ----
+        series_name = _find_series_for_model(perf_path, selected_perf_model, sheet_name="Series")
+        if not series_name:
+            st.info("Series sayfasında seçilen model için seri bulunamadı.")
+        else:
+            showroom = _get_showroom_kpis(perf_path, series_name, sheet_name="BMW Showroom Seri Bazlı")
+
+            walk_html = _format_kpi_box("Walk-in", showroom.get("walk_cur"), showroom.get("walk_prev"))
+            test_html = _format_kpi_box("Test Sürüşü", showroom.get("test_cur"), showroom.get("test_prev"))
+
+            st.markdown(f"""
+            <div class="kv-row">
+              {walk_html}
+              {test_html}
+            </div>
+            """, unsafe_allow_html=True)
 
         # ---- Günlük DIO Model Grafiği + Toplam ----
         st.markdown("### Günlük DIO Model")
