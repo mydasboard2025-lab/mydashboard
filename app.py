@@ -441,37 +441,50 @@ def get_campaigns(perf_path: Path, model_name: str, sheet_name: str = "Sirküler
     - Nakit destek = F sütunu
     - Takas destek = G sütunu
     - Kredi Kampanyası = I sütunu
-    İlk eşleşen satırı döndür.
+    İlk uyumlu satırı döndür. (case-insensitive, contains match)
     """
     try:
         df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
     except Exception:
         return None
 
-    # Excel C3 -> df.iloc[2, 2]
-    sub_start_row = 2  # index 2 ~ satır 3
-    model_col_idx = 2  # C
-    nakit_idx = 5      # F
-    takas_idx = 6      # G
-    kredi_idx = 8      # I
+    start_row = 2    # index 2 -> Excel satır 3
+    col_model = 2    # C
+    col_nakit = 5    # F
+    col_takas = 6    # G
+    col_kredi = 8    # I
 
-    # ilgili satırı bul
-    model_cf = model_name.strip().casefold()
-    for r in range(sub_start_row, df.shape[0]):
-        cell_model = str(df.iat[r, model_col_idx]).strip()
-        if cell_model == "" or cell_model.lower() == "nan":
+    wanted = model_name.strip().casefold()
+
+    best_row = None
+    for r in range(start_row, df.shape[0]):
+        raw_model = str(df.iat[r, col_model]).strip()
+        if raw_model == "" or raw_model.lower() == "nan":
             continue
-        if cell_model.casefold() == model_cf:
-            nakit_val = df.iat[r, nakit_idx] if nakit_idx < df.shape[1] else None
-            takas_val = df.iat[r, takas_idx] if takas_idx < df.shape[1] else None
-            kredi_val = df.iat[r, kredi_idx] if kredi_idx < df.shape[1] else None
-            return {
-                "Nakit destek": "" if pd.isna(nakit_val) else str(nakit_val),
-                "Takas destek": "" if pd.isna(takas_val) else str(takas_val),
-                "Kredi Kampanyası": "" if pd.isna(kredi_val) else str(kredi_val),
-            }
+        m_cf = raw_model.casefold()
 
-    return None
+        # eşleşme kuralı: aynıysa veya biri diğerini içeriyorsa
+        if (m_cf == wanted) or (wanted in m_cf) or (m_cf in wanted):
+            best_row = r
+            break
+
+    if best_row is None:
+        return None
+
+    nakit_val = df.iat[best_row, col_nakit] if col_nakit < df.shape[1] else None
+    takas_val = df.iat[best_row, col_takas] if col_takas < df.shape[1] else None
+    kredi_val = df.iat[best_row, col_kredi] if col_kredi < df.shape[1] else None
+
+    def _clean(v):
+        if pd.isna(v):
+            return ""
+        return str(v).strip()
+
+    return {
+        "Nakit Destek": _clean(nakit_val),
+        "Takas Destek": _clean(takas_val),
+        "Kredi Kampanyası": _clean(kredi_val),
+    }
 
 # ---------- UI: Model Aylık Performans Bölümü ----------
 def build_monthly_performance_ui(perf_path: Path):
@@ -512,7 +525,7 @@ def build_monthly_performance_ui(perf_path: Path):
     </style>
     """, unsafe_allow_html=True)
 
-    # İçinde bulunduğumuz ay kısaltması (Istanbul TZ)
+    # içinde bulunduğumuz ay kısaltması (Istanbul TZ)
     ist_tz = zoneinfo.ZoneInfo("Europe/Istanbul")
     month_abbr = datetime.now(ist_tz).strftime("%b")
 
@@ -583,12 +596,19 @@ def build_monthly_performance_ui(perf_path: Path):
     st.caption(f"Kaynak: {perf_path.name}  •  Ay: {month_abbr}")
 
     # ---- Sirküler Kampanyaları ----
-    st.markdown("#### Kampanyalar (Sirküler)")
     campaign_info = get_campaigns(perf_path, selected_perf_model, sheet_name="Sirküler")
-    if campaign_info is None:
-        st.info("Seçilen model için kampanya bilgisi bulunamadı.")
-    else:
-        camp_df = pd.DataFrame([campaign_info])
+
+    if campaign_info is not None:
+        st.markdown("#### Kampanyalar (Sirküler)")
+
+        camp_df = pd.DataFrame(
+            [{
+                "Nakit Destek": campaign_info.get("Nakit Destek", ""),
+                "Takas Destek": campaign_info.get("Takas Destek", ""),
+                "Kredi Kampanyası": campaign_info.get("Kredi Kampanyası", ""),
+            }]
+        )
+
         st.dataframe(
             camp_df,
             hide_index=True,
@@ -820,7 +840,7 @@ def main():
 
     st.markdown("---")
 
-    # 2) Model Aylık Performans + Kampanyalar (Sirküler) + Günlük DIO Model
+    # 2) Model Aylık Performans + Sirküler + Günlük DIO Model
     perf_excel = find_performance_workbook(DATA_DIR)
     build_monthly_performance_ui(perf_excel)
 
