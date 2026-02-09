@@ -495,9 +495,16 @@ def get_dio_timeseries_and_total(perf_path: Path, model_name: str, sheet_name: s
     out = pd.DataFrame({"Tarih": dates, "Değer": daily_sum})
     out = out[out["Tarih"].notna()].copy()
 
+    # Label üret (aynı gün tekrarlı olabilir; categorical kullanmayacağız)
     out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
     
-    out["TarihLabel"] = pd.Categorical(out["TarihLabel"], categories=out["TarihLabel"].tolist(), ordered=True)
+    # Aynı güne denk gelen tekrarlar varsa birleştir (topla)
+    out = (
+        out.groupby(["Tarih", "TarihLabel"], as_index=False)["Değer"]
+          .sum()
+          .sort_values("Tarih")
+    )
+
 
     # Total: 7. satırdaki 'total' kolonundan
     total_col = _find_total_col_idx(df_dio)
@@ -747,7 +754,7 @@ def build_monthly_performance_ui(perf_path: Path):
             baslik = f"{selected_perf_model} • Günlük DIO Model • Toplam DIO: {fmt_int(dio_total)}"
 
             base = alt.Chart(dio_df).encode(
-                x=alt.X("TarihLabel:N", title="Gün", sort=list(dio_df["TarihLabel"].astype(str))),
+                x=alt.X("TarihLabel:N", title="Gün", sort=alt.SortField(field="Tarih", order="ascending")),
                 y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True, zero=True)),
                 tooltip=[
                     alt.Tooltip("Tarih:T", title="Tarih", format="%d.%m.%Y"),
