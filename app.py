@@ -201,8 +201,8 @@ def build_price_compare_ui(df_raw: pd.DataFrame, source_path: Path):
     # >>> Revize #1: fiyat kolonlarında binlik ayırıcı "." olacak şekilde formatla
     styled = df_group_fmt.style.apply(highlight_selected, axis=1).format(
         {
-            "Stoktaki en uygun otomobil fiyatı": fmt_int,
-            "İndirimli fiyat": fmt_int,
+            "Stoktaki en uygun otomobil fiyatı": lambda v: ("—" if pd.isna(v) else f"{float(v):,.0f}".replace(",", ".")),
+            "İndirimli fiyat": lambda v: ("—" if pd.isna(v) else f"{float(v):,.0f}".replace(",", ".")),
             "Fiyat konumu": lambda v: ("—" if v is None or pd.isna(v) else f"{float(v):.1f}"),
             "İndirimli fiyat konumu": lambda v: ("—" if v is None or pd.isna(v) else f"{float(v):.1f}"),
             "Spec adjusted fiyat konumu": lambda v: ("—" if v is None or pd.isna(v) else f"{float(v):.1f}"),
@@ -396,11 +396,11 @@ def _delta_html(cur: float | None, prev: float | None) -> str:
     return ""
 
 # ---------- DIO Model (Güncel + Önceki Ay + Son 7 iş günü ort.) ----------
+# ---------- DIO Model ----------
 @st.cache_data(show_spinner=False)
 def load_dio_sheet(perf_path: Path, sheet_name: str = "DIO Model") -> pd.DataFrame | None:
     try:
-        df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
-        return df
+        return pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
     except Exception:
         return None
 
@@ -424,37 +424,40 @@ def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp]
         ncols += 1
     return dates, ncols
 
-def _find_total_col_idx(df_dio: pd.DataFrame, start_col: int) -> int | None:
-    # "Total" etiketi: 7. satır (index 6) içinde aranır
+def _find_total_col_idx(df_dio: pd.DataFrame) -> int | None:
+    """
+    7. satırda (index 6) 'total' yazan kolonun index'ini bulur.
+    (Senin tarif ettiğin kesin kural bu.)
+    """
     if df_dio.shape[0] <= 6:
         return None
-    row = df_dio.iloc[6, start_col:].tolist()
-    for j, v in enumerate(row):
+    row7 = df_dio.iloc[6, :].tolist()
+    for c, v in enumerate(row7):
         if isinstance(v, str) and v.strip().casefold() == "total":
-            return start_col + j
+            return c
     return None
 
-def get_dio_metrics(perf_path: Path, model_name: str, sheet_name: str):
+def get_dio_timeseries_and_total(perf_path: Path, model_name: str, sheet_name: str):
     """
-    - Günlük seri (toplamlanmış)
-    - Total (Total kolonundan)
-    - Gün sayısı (tarih kolon adedi)
-    - Günlük ortalama (total / gün sayısı)
-    - Son <=7 iş günü ortalaması (hafta sonu hariç)
+    Dönenler:
+      - out_df: Tarih/Değer (günlük seri, sadece güncel aya ait günlük değerler)
+      - total: 7. satırda 'total' yazan sütundan toplam DIO
+      - day_count: grafikteki gün sayısı (E6'dan itibaren okunan gün)
+      - err: hata mesajı
     """
     df_dio = load_dio_sheet(perf_path, sheet_name)
     if df_dio is None:
-        return None, None, None, None, None, f"'{sheet_name}' sayfası bulunamadı."
+        return None, None, 0, f"'{sheet_name}' sayfası bulunamadı."
 
     row_idxs = _find_model_rows_in_dio(df_dio, model_name)
     if not row_idxs:
-        return None, None, None, None, None, f"'{model_name}' modeli '{sheet_name}' sayfasında bulunamadı."
+        return None, None, 0, f"'{model_name}' modeli '{sheet_name}' sayfasında bulunamadı."
 
     dates, ncols = _extract_day_headers_dates(df_dio)
     if ncols == 0:
-        return None, None, None, None, None, f"'{sheet_name}' sayfasında E6'dan başlayan tarih başlıkları okunamadı."
+        return None, None, 0, f"'{sheet_name}' sayfasında E6'dan başlayan tarih başlıkları okunamadı."
 
-    # günlük seri (model satırları toplanarak)
+    # Günlük seri: model satırları varsa hepsini topla
     daily_sum = np.zeros(ncols, dtype=float)
     for r in row_idxs:
         vals_raw = df_dio.iloc[r, 4:4+ncols].tolist()
@@ -465,32 +468,21 @@ def get_dio_metrics(perf_path: Path, model_name: str, sheet_name: str):
     out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
     out["TarihLabel"] = pd.Categorical(out["TarihLabel"], categories=out["TarihLabel"].tolist(), ordered=True)
 
-    # Total kolonu: 7. satırdaki "Total" etiketinden
-    total_col = _find_total_col_idx(df_dio, start_col=4)
+    # Total: 7. satırdaki 'total' kolonundan
+    total_col = _find_total_col_idx(df_dio)
     if total_col is None:
-        # fallback: önceki mantık (tarih kolonlarından hemen sonra)
-        guess = 4 + ncols
-        total_col = guess if guess < df_dio.shape[1] else None
+        return out, float(daily_sum.sum()), ncols, None  # fallback: günlüklerin toplamı
 
     total_vals = []
-    if total_col is not None:
-        for r in row_idxs:
-            total_cell = df_dio.iat[r, total_col] if total_col < df_dio.shape[1] else None
-            total_vals.append(_to_num(total_cell))
+    for r in row_idxs:
+        cell = df_dio.iat[r, total_col] if total_col < df_dio.shape[1] else None
+        total_vals.append(to_numeric_locale_aware(pd.Series([cell])).iloc[0])
+
     total_series = pd.to_numeric(pd.Series(total_vals), errors="coerce")
-    total = float(total_series.fillna(0).sum()) if total_series.notna().any() else None
+    total = float(total_series.fillna(0).sum()) if total_series.notna().any() else 0.0
 
-    day_count = ncols
-    daily_avg = (total / day_count) if (total is not None and day_count > 0) else None
+    return out, total, ncols, None
 
-    # Son <= 7 iş günü ortalaması
-    work_mask = out["Tarih"].dt.weekday < 5
-    out_work = out.loc[work_mask].copy()
-    last_work = out_work.tail(7) if len(out_work) >= 7 else out_work
-    last_n = int(len(last_work))
-    last_avg = float(last_work["Değer"].mean()) if last_n > 0 else None
-
-    return out, total, day_count, daily_avg, (last_n, last_avg), None
 
 # ---------- Sirküler Sheet'ten Kampanyalar ----------
 @st.cache_data(show_spinner=False)
@@ -676,68 +668,71 @@ def build_monthly_performance_ui(perf_path: Path):
         )
 
     # ---- Günlük DIO Model Grafiği + Toplam + Günlük Ortalama + Önceki Ay + Son 7 İş Günü Ort ----
-    st.markdown("### Günlük DIO Model")
+    # ---- Günlük DIO Model (Toplam + Günlük Ortalama + Geçen Ay karşılaştırma) ----
+st.markdown("### Günlük DIO Model")
 
-    # Güncel ay
-    dio_df, dio_total, dio_days, dio_daily_avg, (last_n, last_avg), dio_err = get_dio_metrics(
-        perf_path, selected_perf_model, "DIO Model"
+# Güncel ay (DIO Model)
+dio_df, dio_total, dio_day_count, dio_err = get_dio_timeseries_and_total(
+    perf_path, selected_perf_model, "DIO Model"
+)
+if dio_err:
+    st.warning(dio_err)
+    return
+
+# Geçen ay (DIO Model Önceki Ay)
+prev_df, prev_total, prev_day_count, prev_err = get_dio_timeseries_and_total(
+    perf_path, selected_perf_model, "DIO Model Önceki Ay"
+)
+
+# Günlük ortalamalar
+dio_daily_avg  = (dio_total / dio_day_count) if (dio_day_count and dio_total is not None) else None
+prev_daily_avg = (prev_total / prev_day_count) if (prev_day_count and prev_total is not None) else None
+
+# % değişim (Total ve Günlük Ortalama)
+total_delta = safe_pct_change(dio_total, prev_total)
+avg_delta   = safe_pct_change(dio_daily_avg, prev_daily_avg)
+
+# Üst metin: Toplam + Günlük Ortalama + Geçen Ay + % değişim
+if prev_err is None:
+    st.markdown(
+        f"**Toplam DIO:** {fmt_int(dio_total)}  |  "
+        f"**Günlük ortalama DIO:** {fmt_float(dio_daily_avg, 2)}  "
+        f"(Geçen ay Toplam: {fmt_int(prev_total)} / Günlük: {fmt_float(prev_daily_avg, 2)}  |  "
+        f"Toplam Δ: {fmt_pct(total_delta)} , Günlük Δ: {fmt_pct(avg_delta)})"
+    )
+else:
+    # Önceki ay sayfası yoksa sadece güncel göster
+    st.markdown(
+        f"**Toplam DIO:** {fmt_int(dio_total)}  |  "
+        f"**Günlük ortalama DIO:** {fmt_float(dio_daily_avg, 2)}"
     )
 
-    # Önceki ay (yeni sheet)
-    prev_df, prev_total, prev_days, prev_daily_avg, _, prev_err = get_dio_metrics(
-        perf_path, selected_perf_model, "DIO Model Önceki Ay"
-    )
-
-    if dio_err:
-        st.warning(dio_err)
-        return
-
-    # Delta hesapları
-    pct_total = safe_pct_change(dio_total, prev_total)
-    pct_daily = safe_pct_change(dio_daily_avg, prev_daily_avg)
-
-    # Üst metin (1. satır)
-    line1 = (
-        f"**Toplam:** {fmt_int(dio_total)}  "
-        f"**(Günlük ort.):** {fmt_float(dio_daily_avg, 2)}  "
-        f"(Önceki ay: {fmt_int(prev_total)} / {fmt_float(prev_daily_avg, 2)}  |  "
-        f"Total Δ: {fmt_pct(pct_total)} , Günlük Δ: {fmt_pct(pct_daily)})"
-        if prev_err is None else
-        f"**Toplam:** {fmt_int(dio_total)}  **(Günlük ort.):** {fmt_float(dio_daily_avg, 2)}"
-    )
-    st.markdown(line1)
-
-    # Alt satır (son iş günleri)
-    st.caption(f"Son {last_n} iş günü (hafta sonu hariç) ort.: {fmt_float(last_avg, 2)}")
-
-    if dio_df is None or len(dio_df) == 0:
-        st.info("Seçilen model için Günlük DIO Model verisi bulunamadı.")
-        return
-
+# Grafik: sadece güncel ayın günlük değerleri
+if dio_df is None or len(dio_df) == 0:
+    st.info("Seçilen model için Günlük DIO Model verisi bulunamadı.")
+else:
     import altair as alt
     BAR_COLOR = "#2a4a7a"
 
-    # Başlık: total + günlük ortalama (TR format)
-    baslik = (
-        f"{selected_perf_model} • Günlük DIO Model • "
-        f"Toplam: {fmt_int(dio_total)} • Günlük Ort: {fmt_float(dio_daily_avg, 2)}"
-    )
+    baslik = f"{selected_perf_model} • Günlük DIO Model • Toplam DIO: {fmt_int(dio_total)}"
 
     base = alt.Chart(dio_df).encode(
         x=alt.X("TarihLabel:N", title="Gün", sort=list(dio_df["TarihLabel"].astype(str))),
         y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True, zero=True)),
         tooltip=[
             alt.Tooltip("Tarih:T", title="Tarih", format="%d.%m.%Y"),
-            alt.Tooltip("Değer:Q", title="Değer", format=",.0f"),
-        ],
+            alt.Tooltip("Değer:Q", title="Değer", format=",.0f")
+        ]
     )
     bars = base.mark_bar(color=BAR_COLOR).properties(height=260)
     labels = base.mark_text(dy=-5, fontSize=11, color=BAR_COLOR).encode(
         text=alt.Text("Değer:Q", format=",.0f")
     )
 
-    chart = (bars + labels).resolve_scale(y="shared").properties(title=baslik)
+    chart = (bars + labels).resolve_scale(y='shared').properties(title=baslik)
     st.altair_chart(chart, use_container_width=True)
+
+    
 
 
 # ================== ODMD SONUÇLARI (Monthly Basis) ==================
