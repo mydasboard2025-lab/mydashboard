@@ -411,49 +411,45 @@ def _find_model_rows_in_dio(df_dio: pd.DataFrame, model_name: str) -> list[int]:
 
 def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp], int]:
     """
-    E6'dan (row index 5, col index 4) başlayarak sağa doğru gider.
-    İlk GERÇEK boş hücreye kadar devam eder.
-    Tarih parse edilemeyen hücre gördüğünde durmaz, sadece atlar.
+    Tarih kolonlarını 7. satırdaki (index 6) 'total' yazan sütuna göre belirler:
+    - Tarihler E6'dan başlar (col=4)
+    - Total sütunundan bir önceki sütuna kadar devam eder
+    Bu sayede 6. satırda arada boş hücre olsa bile grafik kesilmez.
     """
-    headers = df_dio.iloc[5, 4:].tolist()
+    total_col = _find_total_col_idx(df_dio)
+    if total_col is None:
+        # fallback: eski yöntem
+        headers = df_dio.iloc[5, 4:].tolist()
+        dates, ncols = [], 0
+        for h in headers:
+            if pd.isna(h) or str(h).strip() == "":
+                break
+            dtv = pd.to_datetime(h, dayfirst=True, errors="coerce")
+            dates.append(dtv)
+            ncols += 1
+        return dates, ncols
+
+    start_col = 4  # E
+    end_col = total_col  # total'ın bir önceki sütununa kadar okuyacağız
+    ncols = max(0, end_col - start_col)
 
     dates: list[pd.Timestamp] = []
-    ncols = 0
+    last_valid = None
 
-    for h in headers:
-        # Sadece gerçek boşlukta dur
-        if pd.isna(h) or str(h).strip() == "":
-            break
+    for c in range(start_col, end_col):
+        h = df_dio.iat[5, c] if c < df_dio.shape[1] else None  # 6. satır (index 5)
+        dtv = pd.to_datetime(h, dayfirst=True, errors="coerce")
 
-        dtv = None
-
-        # 1) Excel date: datetime/date ise
-        if isinstance(h, (datetime, pd.Timestamp)):
-            dtv = pd.to_datetime(h, errors="coerce")
-
-        # 2) Excel serial (sayı) olabilir
-        elif isinstance(h, (int, float)) and not pd.isna(h):
-            # Excel serial 1 = 1899-12-31 tabanlı (pandas: origin=1899-12-30 yaygın)
-            dtv = pd.to_datetime(h, unit="D", origin="1899-12-30", errors="coerce")
-
-        # 3) String olabilir
-        else:
-            dtv = pd.to_datetime(str(h), dayfirst=True, errors="coerce")
-
-        # Parse edilemezse kesme, devam et
-        if pd.isna(dtv):
-            # yine de kolon sayısını artırıyoruz çünkü değer kolonları da o kadar ilerliyor
-            # ama burada kritik: değerleri hizalamak için bu kolonu saymalıyız.
-            # Eğer burada ncols artırmazsak değerler kayar.
-            dates.append(pd.NaT)
-            ncols += 1
-            continue
+        # Eğer tarih parse edilemediyse ama önceki gün varsa +1 gün diye devam et
+        if pd.isna(dtv) and last_valid is not None:
+            dtv = last_valid + pd.Timedelta(days=1)
 
         dates.append(dtv)
-        ncols += 1
+        if not pd.isna(dtv):
+            last_valid = dtv
 
-    # Tarih label için NaT'leri de tutuyoruz; grafikte boş label istemezsen aşağıda temizleyeceğiz
     return dates, ncols
+
 
 
 def _find_total_col_idx(df_dio: pd.DataFrame) -> int | None:
