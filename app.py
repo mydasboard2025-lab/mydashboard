@@ -410,19 +410,51 @@ def _find_model_rows_in_dio(df_dio: pd.DataFrame, model_name: str) -> list[int]:
     return [int(i) for i in mask[mask].index.tolist()]
 
 def _extract_day_headers_dates(df_dio: pd.DataFrame) -> tuple[list[pd.Timestamp], int]:
-    # Tarihler: 6. satır (index 5), E sütunundan (index 4) itibaren
+    """
+    E6'dan (row index 5, col index 4) başlayarak sağa doğru gider.
+    İlk GERÇEK boş hücreye kadar devam eder.
+    Tarih parse edilemeyen hücre gördüğünde durmaz, sadece atlar.
+    """
     headers = df_dio.iloc[5, 4:].tolist()
+
     dates: list[pd.Timestamp] = []
     ncols = 0
+
     for h in headers:
+        # Sadece gerçek boşlukta dur
         if pd.isna(h) or str(h).strip() == "":
             break
-        dtv = pd.to_datetime(h, dayfirst=True, errors="coerce")
+
+        dtv = None
+
+        # 1) Excel date: datetime/date ise
+        if isinstance(h, (datetime, pd.Timestamp)):
+            dtv = pd.to_datetime(h, errors="coerce")
+
+        # 2) Excel serial (sayı) olabilir
+        elif isinstance(h, (int, float)) and not pd.isna(h):
+            # Excel serial 1 = 1899-12-31 tabanlı (pandas: origin=1899-12-30 yaygın)
+            dtv = pd.to_datetime(h, unit="D", origin="1899-12-30", errors="coerce")
+
+        # 3) String olabilir
+        else:
+            dtv = pd.to_datetime(str(h), dayfirst=True, errors="coerce")
+
+        # Parse edilemezse kesme, devam et
         if pd.isna(dtv):
-            break
+            # yine de kolon sayısını artırıyoruz çünkü değer kolonları da o kadar ilerliyor
+            # ama burada kritik: değerleri hizalamak için bu kolonu saymalıyız.
+            # Eğer burada ncols artırmazsak değerler kayar.
+            dates.append(pd.NaT)
+            ncols += 1
+            continue
+
         dates.append(dtv)
         ncols += 1
+
+    # Tarih label için NaT'leri de tutuyoruz; grafikte boş label istemezsen aşağıda temizleyeceğiz
     return dates, ncols
+
 
 def _find_total_col_idx(df_dio: pd.DataFrame) -> int | None:
     """
@@ -465,7 +497,10 @@ def get_dio_timeseries_and_total(perf_path: Path, model_name: str, sheet_name: s
         daily_sum += vals_num
 
     out = pd.DataFrame({"Tarih": dates, "Değer": daily_sum})
+    out = out[out["Tarih"].notna()].copy()
+
     out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
+    
     out["TarihLabel"] = pd.Categorical(out["TarihLabel"], categories=out["TarihLabel"].tolist(), ordered=True)
 
     # Total: 7. satırdaki 'total' kolonundan
