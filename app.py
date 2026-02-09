@@ -669,68 +669,67 @@ def build_monthly_performance_ui(perf_path: Path):
 
     # ---- Günlük DIO Model Grafiği + Toplam + Günlük Ortalama + Önceki Ay + Son 7 İş Günü Ort ----
     # ---- Günlük DIO Model (Toplam + Günlük Ortalama + Geçen Ay karşılaştırma) ----
-st.markdown("### Günlük DIO Model")
+        # ---- Günlük DIO Model (Toplam + Günlük Ortalama + Geçen Ay karşılaştırma) ----
+    st.markdown("### Günlük DIO Model")
 
-# Güncel ay (DIO Model)
-dio_df, dio_total, dio_day_count, dio_err = get_dio_timeseries_and_total(
-    perf_path, selected_perf_model, "DIO Model"
-)
-if dio_err:
-    st.warning(dio_err)
-    return
-
-# Geçen ay (DIO Model Önceki Ay)
-prev_df, prev_total, prev_day_count, prev_err = get_dio_timeseries_and_total(
-    perf_path, selected_perf_model, "DIO Model Önceki Ay"
-)
-
-# Günlük ortalamalar
-dio_daily_avg  = (dio_total / dio_day_count) if (dio_day_count and dio_total is not None) else None
-prev_daily_avg = (prev_total / prev_day_count) if (prev_day_count and prev_total is not None) else None
-
-# % değişim (Total ve Günlük Ortalama)
-total_delta = safe_pct_change(dio_total, prev_total)
-avg_delta   = safe_pct_change(dio_daily_avg, prev_daily_avg)
-
-# Üst metin: Toplam + Günlük Ortalama + Geçen Ay + % değişim
-if prev_err is None:
-    st.markdown(
-        f"**Toplam DIO:** {fmt_int(dio_total)}  |  "
-        f"**Günlük ortalama DIO:** {fmt_float(dio_daily_avg, 2)}  "
-        f"(Geçen ay Toplam: {fmt_int(prev_total)} / Günlük: {fmt_float(prev_daily_avg, 2)}  |  "
-        f"Toplam Δ: {fmt_pct(total_delta)} , Günlük Δ: {fmt_pct(avg_delta)})"
-    )
-else:
-    # Önceki ay sayfası yoksa sadece güncel göster
-    st.markdown(
-        f"**Toplam DIO:** {fmt_int(dio_total)}  |  "
-        f"**Günlük ortalama DIO:** {fmt_float(dio_daily_avg, 2)}"
+    dio_df, dio_total, dio_day_count, dio_err = get_dio_timeseries_and_total(
+        perf_path, selected_perf_model, "DIO Model"
     )
 
-# Grafik: sadece güncel ayın günlük değerleri
-if dio_df is None or len(dio_df) == 0:
-    st.info("Seçilen model için Günlük DIO Model verisi bulunamadı.")
-else:
-    import altair as alt
-    BAR_COLOR = "#2a4a7a"
+    if dio_err:
+        st.warning(dio_err)
+    else:
+        # Geçen ay (DIO Model Önceki Ay)
+        prev_df, prev_total, prev_day_count, prev_err = get_dio_timeseries_and_total(
+            perf_path, selected_perf_model, "DIO Model Önceki Ay"
+        )
 
-    baslik = f"{selected_perf_model} • Günlük DIO Model • Toplam DIO: {fmt_int(dio_total)}"
+        # Günlük ortalamalar
+        dio_daily_avg  = (dio_total / dio_day_count) if (dio_day_count and dio_total is not None) else None
+        prev_daily_avg = (prev_total / prev_day_count) if (prev_day_count and prev_total is not None) else None
 
-    base = alt.Chart(dio_df).encode(
-        x=alt.X("TarihLabel:N", title="Gün", sort=list(dio_df["TarihLabel"].astype(str))),
-        y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True, zero=True)),
-        tooltip=[
-            alt.Tooltip("Tarih:T", title="Tarih", format="%d.%m.%Y"),
-            alt.Tooltip("Değer:Q", title="Değer", format=",.0f")
-        ]
-    )
-    bars = base.mark_bar(color=BAR_COLOR).properties(height=260)
-    labels = base.mark_text(dy=-5, fontSize=11, color=BAR_COLOR).encode(
-        text=alt.Text("Değer:Q", format=",.0f")
-    )
+        # % değişim
+        total_delta = safe_pct_change(dio_total, prev_total)
+        avg_delta   = safe_pct_change(dio_daily_avg, prev_daily_avg)
 
-    chart = (bars + labels).resolve_scale(y='shared').properties(title=baslik)
-    st.altair_chart(chart, use_container_width=True)
+        # Üst metin
+        if prev_err is None:
+            st.markdown(
+                f"**Toplam DIO:** {fmt_int(dio_total)}  |  "
+                f"**Günlük ortalama DIO:** {fmt_float(dio_daily_avg, 2)}  "
+                f"(Geçen ay Toplam: {fmt_int(prev_total)} / Günlük: {fmt_float(prev_daily_avg, 2)}  |  "
+                f"Toplam Δ: {fmt_pct(total_delta)} , Günlük Δ: {fmt_pct(avg_delta)})"
+            )
+        else:
+            st.markdown(
+                f"**Toplam DIO:** {fmt_int(dio_total)}  |  "
+                f"**Günlük ortalama DIO:** {fmt_float(dio_daily_avg, 2)}"
+            )
+
+        # Grafik (sadece güncel ay)
+        if dio_df is None or len(dio_df) == 0:
+            st.info("Seçilen model için Günlük DIO Model verisi bulunamadı.")
+        else:
+            import altair as alt
+            BAR_COLOR = "#2a4a7a"
+
+            baslik = f"{selected_perf_model} • Günlük DIO Model • Toplam DIO: {fmt_int(dio_total)}"
+
+            base = alt.Chart(dio_df).encode(
+                x=alt.X("TarihLabel:N", title="Gün", sort=list(dio_df["TarihLabel"].astype(str))),
+                y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True, zero=True)),
+                tooltip=[
+                    alt.Tooltip("Tarih:T", title="Tarih", format="%d.%m.%Y"),
+                    alt.Tooltip("Değer:Q", title="Değer", format=",.0f")
+                ]
+            )
+            bars = base.mark_bar(color=BAR_COLOR).properties(height=260)
+            labels = base.mark_text(dy=-5, fontSize=11, color=BAR_COLOR).encode(
+                text=alt.Text("Değer:Q", format=",.0f")
+            )
+
+            chart = (bars + labels).resolve_scale(y='shared').properties(title=baslik)
+            st.altair_chart(chart, use_container_width=True)
 
     
 
