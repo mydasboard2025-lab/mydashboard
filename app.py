@@ -90,6 +90,17 @@ def safe_pct_change(curr, prev):
     return (curr / prev) - 1.0
 
 # ================== RAKİP KARŞILAŞTIRMA ==================
+
+def format_model_with_my(model, my_value):
+    model_str = "" if pd.isna(model) else str(model).strip()
+    my_str = "" if pd.isna(my_value) else str(my_value).strip().upper()
+
+    if my_str == "MY25":
+        return f"{model_str} (25 MY)"
+    elif my_str == "MY26":
+        return f"{model_str} (26 MY)"
+    return model_str
+
 def find_price_excel(data_dir: Path) -> Path | None:
     if not data_dir.exists():
         return None
@@ -110,20 +121,24 @@ def load_price_compare(path: Path) -> pd.DataFrame:
     df = pd.read_excel(
         path,
         sheet_name=0,
-        usecols="D:Q",
+        usecols="C:Q",
         skiprows=3,
         header=None,
         engine="openpyxl",
     )
     df.columns = [
-        "Marka", "Model", "Paket", "_G",
-        "Stoktaki en uygun otomobil fiyatı",  # H
-        "Fiyat konumu",                       # I
-        "İndirim oranı",                      # J
+        "Model Yılı",                        # C
+        "Marka",                             # D
+        "Model",                             # E
+        "Paket",                             # F
+        "_G",                                # G
+        "Stoktaki en uygun otomobil fiyatı", # H
+        "Fiyat konumu",                      # I
+        "İndirim oranı",                     # J
         "_K", "_L", "_M", "_N",
-        "İndirimli fiyat",                    # O
-        "İndirimli fiyat konumu",             # P
-        "Spec adjusted fiyat konumu",         # Q
+        "İndirimli fiyat",                   # O
+        "İndirimli fiyat konumu",            # P
+        "Spec adjusted fiyat konumu",        # Q
     ]
 
     # Grup kimliği: Marka boşsa grup ayırıcı
@@ -177,6 +192,10 @@ def build_price_compare_ui(df_raw: pd.DataFrame, source_path: Path):
     # Aynı gruptaki rakipleri listele
     group_id = int(df_sel["__group_id__"].iloc[0])
     df_group = df_raw[(df_raw["__group_id__"] == group_id) & (df_raw["Marka"].notna())].copy()
+    df_group["Model"] = df_group.apply(
+        lambda r: format_model_with_my(r["Model"], r["Model Yılı"]),
+        axis=1
+    )
 
     display_cols = [
         "Marka", "Model", "Paket",
