@@ -686,7 +686,11 @@ def build_monthly_performance_ui(perf_path: Path):
     </style>
     """, unsafe_allow_html=True)
 
-    month_abbr = datetime.now(IST_TZ).strftime("%b")
+    reference_date = get_reference_date_from_dio(perf_path, sheet_name="DIO Model")
+    if reference_date is None:
+        reference_date = pd.Timestamp(datetime.now(IST_TZ)).normalize()
+
+    month_abbr = reference_date.strftime("%b")
 
     model_options = load_model_lists(perf_path)
     if not model_options:
@@ -746,23 +750,37 @@ def build_monthly_performance_ui(perf_path: Path):
     </div>
     """
     st.markdown(html, unsafe_allow_html=True)
-    st.caption(f"Kaynak: {perf_path.name} • Ay: {month_abbr}")
+    st.caption(
+        f"Kaynak: {perf_path.name} • Referans tarih: {reference_date.strftime('%d.%m.%Y')} • Ay: {month_abbr}"
+    )
 
     campaign_info = get_campaigns(perf_path, selected_perf_model, sheet_name="Sirküler")
+
     if campaign_info is not None:
         st.markdown("#### Kampanyalar (Sirküler)")
-        camp_df = pd.DataFrame([{
-            "Nakit Destek": campaign_info.get("Nakit Destek", ""),
-            "Takas Destek": campaign_info.get("Takas Destek", ""),
-            "Kredi Kampanyası": campaign_info.get("Kredi Kampanyası", ""),
-        }])
-        st.dataframe(camp_df, hide_index=True, use_container_width=False)
+
+        camp_df = pd.DataFrame(
+            [{
+                "Nakit Destek": campaign_info.get("Nakit Destek", ""),
+                "Takas Destek": campaign_info.get("Takas Destek", ""),
+                "Kredi Kampanyası": campaign_info.get("Kredi Kampanyası", ""),
+            }]
+        )
+
+        st.dataframe(
+            camp_df,
+            hide_index=True,
+            use_container_width=False
+        )
 
     st.markdown("### Günlük DIO Model")
 
     dio_df, dio_total, dio_day_count, dio_err = get_dio_timeseries_and_total(
         perf_path, selected_perf_model, "DIO Model"
     )
+
+    if dio_df is not None and reference_date is not None:
+        dio_df = dio_df[dio_df["Tarih"] <= reference_date].copy()
 
     if dio_err:
         st.warning(dio_err)
@@ -794,8 +812,8 @@ def build_monthly_performance_ui(perf_path: Path):
             st.info("Seçilen model için Günlük DIO Model verisi bulunamadı.")
         else:
             import altair as alt
+            BAR_COLOR = "#2a4a7a"
 
-            bar_color = "#2a4a7a"
             baslik = f"{selected_perf_model} • Günlük DIO Model • Toplam DIO: {fmt_int(dio_total)}"
 
             base = alt.Chart(dio_df).encode(
@@ -806,13 +824,12 @@ def build_monthly_performance_ui(perf_path: Path):
                     alt.Tooltip("Değer:Q", title="Değer", format=",.0f")
                 ]
             )
-
-            bars = base.mark_bar(color=bar_color).properties(height=260)
-            labels = base.mark_text(dy=-5, fontSize=11, color=bar_color).encode(
+            bars = base.mark_bar(color=BAR_COLOR).properties(height=260)
+            labels = base.mark_text(dy=-5, fontSize=11, color=BAR_COLOR).encode(
                 text=alt.Text("Değer:Q", format=",.0f")
             )
 
-            chart = (bars + labels).resolve_scale(y="shared").properties(title=baslik)
+            chart = (bars + labels).resolve_scale(y='shared').properties(title=baslik)
             st.altair_chart(chart, use_container_width=True)
 
 
@@ -911,13 +928,18 @@ def format_int(x):
 def build_odmd_ui(perf_path: Path):
     st.markdown("## ODMD Sonuçları")
 
+    reference_date = get_reference_date_from_dio(perf_path, sheet_name="DIO Model")
+    if reference_date is None:
+        reference_date = pd.Timestamp(datetime.now(IST_TZ)).normalize()
+
     try:
         data_df = load_focus_segment_df_from_perf(perf_path, sheet_name="Monthly Basis")
     except ValueError as e:
         st.warning(str(e))
         return
 
-    calc_df, prev_month_name, last3_names, ytd_denom = compute_metrics(data_df)
+    calc_df, prev_month_name, last3_names, ytd_denom = compute_metrics(data_df, reference_date)
+
     calc_df = calc_df[calc_df["YTD"].fillna(0) != 0].copy()
 
     bmw_models = (
@@ -926,8 +948,6 @@ def build_odmd_ui(perf_path: Path):
         .drop_duplicates()
         .tolist()
     )
-    bmw_models = sorted(bmw_models, key=str.casefold)
-
     if not bmw_models:
         st.info("BMW modeli bulunamadı. Lütfen 'Monthly Basis' sayfasındaki verileri kontrol edin.")
         return
@@ -954,10 +974,11 @@ def build_odmd_ui(perf_path: Path):
     view = group_view[["Marka", "Model", "Aylık Satış", "3 Aylık Satış", "YTD Satış"]].copy()
     view = style_bmw_first(view)
 
-    cur_idx, prev_idx, last3, now = current_month_info()
+    cur_idx, prev_idx, last3, now = current_month_info(reference_date)
 
     st.caption(
         f"Kaynak: {Path(perf_path).name} • Sayfa: 'Monthly Basis' • "
+        f"Referans tarih: {reference_date.strftime('%d.%m.%Y')} • "
         f"İçinde bulunulan ay: {MONTHS_EN[cur_idx]} • "
         f"Aylık Satış = {MONTHS_EN[prev_idx]} • "
         f"3 Aylık = {', '.join(MONTHS_EN[i] for i in last3)} • "
@@ -968,7 +989,9 @@ def build_odmd_ui(perf_path: Path):
         view.style
         .apply(
             lambda s: [
-                "font-weight: 700" if view.loc[s.name, "Marka"].upper() == "BMW" else ""
+                "font-weight: 700"
+                if (s.name in view.index and view.loc[s.name, 'Marka'].upper() == 'BMW')
+                else ""
                 for _ in s
             ],
             axis=1
@@ -986,9 +1009,14 @@ def build_odmd_ui(perf_path: Path):
     st.download_button(
         "CSV indir (filtrelenmiş)",
         data=csv_bytes,
-        file_name=f"odmd_sonuclari_{Path(perf_path).stem.replace(' ','_')}_{selected_bmw.replace(' ','_')}.csv",
+        file_name=(
+            f"odmd_sonuclari_"
+            f"{Path(perf_path).stem.replace(' ','_')}_"
+            f"{selected_bmw.replace(' ','_')}.csv"
+        ),
         mime="text/csv"
     )
+
 
 
 # ================== UYGULAMA AKIŞI ==================
