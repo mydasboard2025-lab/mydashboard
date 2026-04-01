@@ -3,7 +3,6 @@ pandas>=2.0
 plotly
 openpyxl>=3.1
 requests
-pytz
 numpy
 matplotlib
 pillow
