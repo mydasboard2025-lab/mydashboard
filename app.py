@@ -835,9 +835,17 @@ def build_monthly_performance_ui(perf_path: Path):
     if dio_df is None or len(dio_df) == 0:
         st.info("Seçilen model için Günlük DIO Model verisi bulunamadı.")
         return
+    dio_df = dio_df.copy()
+    dio_df["Tarih"] = pd.to_datetime(dio_df["Tarih"], errors="coerce").dt.normalize()
+    
+    dio_df = (
+        dio_df.groupby("Tarih", as_index=False)["Değer"]
+        .sum()
+        .sort_values("Tarih")
+    )
 
-    dio_df = dio_df.sort_values("Tarih").copy()
     dio_df["TarihLabel"] = dio_df["Tarih"].dt.strftime("%d.%m")
+    
 
     visible_total = float(pd.to_numeric(dio_df["Değer"], errors="coerce").fillna(0).sum())
     visible_day_count = len(dio_df)
@@ -871,10 +879,10 @@ def build_monthly_performance_ui(perf_path: Path):
 
     base = alt.Chart(dio_df).encode(
         x=alt.X(
-            "Tarih:T",
+            "TarihLabel:N",
             title="Gün",
-            axis=alt.Axis(format="%d.%m", labelAngle=90),
-            sort="ascending"
+            sort=alt.SortField(field="Tarih", order="ascending"),
+            axis=alt.Axis(labelAngle=90)
         ),
         y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True, zero=True)),
         tooltip=[
