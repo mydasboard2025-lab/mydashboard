@@ -10,11 +10,9 @@ import zoneinfo
 st.set_page_config(page_title="Fiyat Karşılaştırması Dashboard", layout="wide")
 DATA_DIR = Path("data")
 
-# Dosya isimleri
 PRICE_FILE_NAME = "Fiyat Karşılaştırması_v4.xlsx"
 PERF_FILE_NAME = "Model aylık performans.xlsx"
 
-# Ortak sabitler
 IST_TZ = zoneinfo.ZoneInfo("Europe/Istanbul")
 MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -117,11 +115,16 @@ def clean_string_list(values) -> list[str]:
     return sorted(vals, key=str.casefold)
 
 
+def normalize_model_text(x: str) -> str:
+    if x is None or pd.isna(x):
+        return ""
+    s = str(x).strip().casefold()
+    s = re.sub(r"\byeni\b", " ", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def get_reference_date_from_dio(perf_path: Path, sheet_name: str = "DIO Model") -> pd.Timestamp | None:
-    """
-    Referans tarih:
-    DIO Model sayfasında 6. satırdaki (pandas index 5) en sağdaki/geçerli son tarih.
-    """
     try:
         df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
     except Exception:
@@ -130,7 +133,7 @@ def get_reference_date_from_dio(perf_path: Path, sheet_name: str = "DIO Model") 
     if df.shape[0] <= 5:
         return None
 
-    row6 = df.iloc[5, 4:]  # E'den itibaren tara
+    row6 = df.iloc[5, 4:]
     parsed = pd.to_datetime(row6, dayfirst=True, errors="coerce").dropna()
     if len(parsed) == 0:
         return None
@@ -467,16 +470,31 @@ def _find_series_for_model(perf_path: Path, model_name: str, sheet_name: str = "
     except Exception:
         return None
 
-    model_cf = str(model_name).strip().casefold()
+    target = normalize_model_text(model_name)
 
     for i in range(df.shape[0]):
-        row_vals = clean_string_series(df.iloc[i, :]).fillna("").astype(str).str.casefold()
-        if (row_vals == model_cf).any():
+        row_vals = df.iloc[i, :].astype(str).tolist()
+        normalized_vals = [normalize_model_text(v) for v in row_vals]
+
+        if target in normalized_vals:
             val = df.iat[i, 1]
             if pd.isna(val):
                 return None
             val = str(val).strip()
             return None if val.lower() == "nan" else val
+
+    # fallback: contains
+    for i in range(df.shape[0]):
+        row_vals = df.iloc[i, :].astype(str).tolist()
+        normalized_vals = [normalize_model_text(v) for v in row_vals]
+
+        for v in normalized_vals:
+            if v and (v == target or target in v or v in target):
+                val = df.iat[i, 1]
+                if pd.isna(val):
+                    return None
+                val = str(val).strip()
+                return None if val.lower() == "nan" else val
 
     return None
 
@@ -487,9 +505,16 @@ def _get_showroom_kpis(perf_path: Path, series_name: str, sheet_name: str = "BMW
     except Exception:
         return {"walk_cur": None, "walk_prev": None, "test_cur": None, "test_prev": None}
 
-    col_b = clean_string_series(df.iloc[:, 1])
-    mask = col_b.fillna("").str.casefold() == str(series_name).strip().casefold()
-    idx = mask[mask].index.tolist()
+    if not series_name:
+        return {"walk_cur": None, "walk_prev": None, "test_cur": None, "test_prev": None}
+
+    target = normalize_model_text(series_name)
+    col_b = df.iloc[:, 1].astype(str).fillna("").tolist()
+    normalized_col_b = [normalize_model_text(v) for v in col_b]
+
+    idx = [i for i, v in enumerate(normalized_col_b) if v == target]
+    if not idx:
+        idx = [i for i, v in enumerate(normalized_col_b) if v and (target in v or v in target)]
 
     if not idx:
         return {"walk_cur": None, "walk_prev": None, "test_cur": None, "test_prev": None}
@@ -500,10 +525,10 @@ def _get_showroom_kpis(perf_path: Path, series_name: str, sheet_name: str = "BMW
         return to_numeric_locale_aware(pd.Series([x])).iloc[0]
 
     vals = {
-        "walk_cur": _num(df.iat[r, 10]) if 10 < df.shape[1] else pd.NA,
-        "walk_prev": _num(df.iat[r, 14]) if 14 < df.shape[1] else pd.NA,
-        "test_cur": _num(df.iat[r, 11]) if 11 < df.shape[1] else pd.NA,
-        "test_prev": _num(df.iat[r, 16]) if 16 < df.shape[1] else pd.NA,
+        "walk_cur": _num(df.iat[r, 10]) if 10 < df.shape[1] else pd.NA,   # K
+        "walk_prev": _num(df.iat[r, 14]) if 14 < df.shape[1] else pd.NA,  # O
+        "test_cur": _num(df.iat[r, 11]) if 11 < df.shape[1] else pd.NA,   # L
+        "test_prev": _num(df.iat[r, 16]) if 16 < df.shape[1] else pd.NA,  # Q
     }
 
     for k, v in list(vals.items()):
@@ -609,11 +634,11 @@ def get_dio_timeseries_and_total(perf_path: Path, model_name: str, sheet_name: s
 
     out = pd.DataFrame({"Tarih": dates, "Değer": daily_sum})
     out = out[out["Tarih"].notna()].copy()
+    out = out.sort_values("Tarih").copy()
+    out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
 
     total_col = _find_total_col_idx(df_dio)
     if total_col is None:
-        out = out.sort_values("Tarih").copy()
-        out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
         return out, float(daily_sum.sum()), len(out), None
 
     total_vals = []
@@ -624,8 +649,6 @@ def get_dio_timeseries_and_total(perf_path: Path, model_name: str, sheet_name: s
     total_series = pd.to_numeric(pd.Series(total_vals), errors="coerce")
     total = float(total_series.fillna(0).sum()) if total_series.notna().any() else 0.0
 
-    out = out.sort_values("Tarih").copy()
-    out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
     return out, total, len(out), None
 
 
@@ -816,7 +839,6 @@ def build_monthly_performance_ui(perf_path: Path):
     dio_df = dio_df.sort_values("Tarih").copy()
     dio_df["TarihLabel"] = dio_df["Tarih"].dt.strftime("%d.%m")
 
-    # Referans tarihe kadar görünen veriye göre toplam/ortalama
     visible_total = float(pd.to_numeric(dio_df["Değer"], errors="coerce").fillna(0).sum())
     visible_day_count = len(dio_df)
     dio_daily_avg = (visible_total / visible_day_count) if visible_day_count else None
@@ -848,7 +870,12 @@ def build_monthly_performance_ui(perf_path: Path):
     baslik = f"{selected_perf_model} • Günlük DIO Model • Toplam DIO: {fmt_int(visible_total)}"
 
     base = alt.Chart(dio_df).encode(
-        x=alt.X("TarihLabel:N", title="Gün", sort=alt.SortField(field="Tarih", order="ascending")),
+        x=alt.X(
+            "Tarih:T",
+            title="Gün",
+            axis=alt.Axis(format="%d.%m", labelAngle=90),
+            sort="ascending"
+        ),
         y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True, zero=True)),
         tooltip=[
             alt.Tooltip("Tarih:T", title="Tarih", format="%d.%m.%Y"),
