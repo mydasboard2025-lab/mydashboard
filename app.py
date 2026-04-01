@@ -117,6 +117,39 @@ def clean_string_list(values) -> list[str]:
     return sorted(vals, key=str.casefold)
 
 
+def get_reference_date_from_dio(perf_path: Path, sheet_name: str = "DIO Model") -> pd.Timestamp | None:
+    """
+    Referans tarih:
+    DIO Model sayfasında 6. satırdaki (pandas index 5) en sağdaki/geçerli son tarih.
+    """
+    try:
+        df = pd.read_excel(perf_path, sheet_name=sheet_name, header=None, engine="openpyxl")
+    except Exception:
+        return None
+
+    if df.shape[0] <= 5:
+        return None
+
+    row6 = df.iloc[5, 4:]  # E'den itibaren tara
+    parsed = pd.to_datetime(row6, dayfirst=True, errors="coerce").dropna()
+    if len(parsed) == 0:
+        return None
+
+    return pd.Timestamp(parsed.max()).normalize()
+
+
+def current_month_info(reference_date: pd.Timestamp | None = None):
+    if reference_date is None:
+        ref = pd.Timestamp(datetime.now(IST_TZ)).normalize()
+    else:
+        ref = pd.Timestamp(reference_date).normalize()
+
+    cur_month_idx = ref.month - 1
+    prev_idx = (cur_month_idx - 1) % 12
+    last3 = [(prev_idx - 2) % 12, (prev_idx - 1) % 12, prev_idx]
+    return cur_month_idx, prev_idx, last3, ref
+
+
 # ================== RAKİP KARŞILAŞTIRMA ==================
 def format_model_with_my(model, my_value):
     model_str = "" if pd.isna(model) else str(model).strip()
@@ -576,17 +609,12 @@ def get_dio_timeseries_and_total(perf_path: Path, model_name: str, sheet_name: s
 
     out = pd.DataFrame({"Tarih": dates, "Değer": daily_sum})
     out = out[out["Tarih"].notna()].copy()
-    out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
-
-    out = (
-        out.groupby(["Tarih", "TarihLabel"], as_index=False)["Değer"]
-        .sum()
-        .sort_values("Tarih")
-    )
 
     total_col = _find_total_col_idx(df_dio)
     if total_col is None:
-        return out, float(daily_sum.sum()), ncols, None
+        out = out.sort_values("Tarih").copy()
+        out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
+        return out, float(daily_sum.sum()), len(out), None
 
     total_vals = []
     for r in row_idxs:
@@ -596,7 +624,9 @@ def get_dio_timeseries_and_total(perf_path: Path, model_name: str, sheet_name: s
     total_series = pd.to_numeric(pd.Series(total_vals), errors="coerce")
     total = float(total_series.fillna(0).sum()) if total_series.notna().any() else 0.0
 
-    return out, total, ncols, None
+    out = out.sort_values("Tarih").copy()
+    out["TarihLabel"] = out["Tarih"].dt.strftime("%d.%m")
+    return out, total, len(out), None
 
 
 # ---------- Sirküler ----------
@@ -649,6 +679,7 @@ def get_campaigns(perf_path: Path, model_name: str, sheet_name: str = "Sirküler
     }
 
 
+# ---------- Monthly Performance UI ----------
 def build_monthly_performance_ui(perf_path: Path):
     st.markdown("## Model Aylık Performans (Retail / Handover / Presold / Free / Walk-in / Test Sürüşü)")
 
@@ -758,79 +789,80 @@ def build_monthly_performance_ui(perf_path: Path):
 
     if campaign_info is not None:
         st.markdown("#### Kampanyalar (Sirküler)")
-
-        camp_df = pd.DataFrame(
-            [{
-                "Nakit Destek": campaign_info.get("Nakit Destek", ""),
-                "Takas Destek": campaign_info.get("Takas Destek", ""),
-                "Kredi Kampanyası": campaign_info.get("Kredi Kampanyası", ""),
-            }]
-        )
-
-        st.dataframe(
-            camp_df,
-            hide_index=True,
-            use_container_width=False
-        )
+        camp_df = pd.DataFrame([{
+            "Nakit Destek": campaign_info.get("Nakit Destek", ""),
+            "Takas Destek": campaign_info.get("Takas Destek", ""),
+            "Kredi Kampanyası": campaign_info.get("Kredi Kampanyası", ""),
+        }])
+        st.dataframe(camp_df, hide_index=True, use_container_width=False)
 
     st.markdown("### Günlük DIO Model")
 
-    dio_df, dio_total, dio_day_count, dio_err = get_dio_timeseries_and_total(
+    dio_df, dio_total_from_sheet, dio_day_count, dio_err = get_dio_timeseries_and_total(
         perf_path, selected_perf_model, "DIO Model"
     )
+
+    if dio_err:
+        st.warning(dio_err)
+        return
 
     if dio_df is not None and reference_date is not None:
         dio_df = dio_df[dio_df["Tarih"] <= reference_date].copy()
 
-    if dio_err:
-        st.warning(dio_err)
+    if dio_df is None or len(dio_df) == 0:
+        st.info("Seçilen model için Günlük DIO Model verisi bulunamadı.")
+        return
+
+    dio_df = dio_df.sort_values("Tarih").copy()
+    dio_df["TarihLabel"] = dio_df["Tarih"].dt.strftime("%d.%m")
+
+    # Referans tarihe kadar görünen veriye göre toplam/ortalama
+    visible_total = float(pd.to_numeric(dio_df["Değer"], errors="coerce").fillna(0).sum())
+    visible_day_count = len(dio_df)
+    dio_daily_avg = (visible_total / visible_day_count) if visible_day_count else None
+
+    prev_df, prev_total, prev_day_count, prev_err = get_dio_timeseries_and_total(
+        perf_path, selected_perf_model, "DIO Model Önceki Ay"
+    )
+
+    prev_daily_avg = (prev_total / prev_day_count) if (prev_day_count and prev_total is not None) else None
+    total_delta = safe_pct_change(visible_total, prev_total)
+    avg_delta = safe_pct_change(dio_daily_avg, prev_daily_avg)
+
+    if prev_err is None:
+        st.markdown(
+            f"**Toplam DIO:** {fmt_int(visible_total)}  |  "
+            f"**Günlük ortalama DIO:** {fmt_float(dio_daily_avg, 2)}  "
+            f"(Geçen ay Toplam: {fmt_int(prev_total)} / Günlük: {fmt_float(prev_daily_avg, 2)}  |  "
+            f"Toplam Δ: {fmt_pct(total_delta)} , Günlük Δ: {fmt_pct(avg_delta)})"
+        )
     else:
-        prev_df, prev_total, prev_day_count, prev_err = get_dio_timeseries_and_total(
-            perf_path, selected_perf_model, "DIO Model Önceki Ay"
+        st.markdown(
+            f"**Toplam DIO:** {fmt_int(visible_total)}  |  "
+            f"**Günlük ortalama DIO:** {fmt_float(dio_daily_avg, 2)}"
         )
 
-        dio_daily_avg = (dio_total / dio_day_count) if (dio_day_count and dio_total is not None) else None
-        prev_daily_avg = (prev_total / prev_day_count) if (prev_day_count and prev_total is not None) else None
+    import altair as alt
 
-        total_delta = safe_pct_change(dio_total, prev_total)
-        avg_delta = safe_pct_change(dio_daily_avg, prev_daily_avg)
+    bar_color = "#2a4a7a"
+    baslik = f"{selected_perf_model} • Günlük DIO Model • Toplam DIO: {fmt_int(visible_total)}"
 
-        if prev_err is None:
-            st.markdown(
-                f"**Toplam DIO:** {fmt_int(dio_total)}  |  "
-                f"**Günlük ortalama DIO:** {fmt_float(dio_daily_avg, 2)}  "
-                f"(Geçen ay Toplam: {fmt_int(prev_total)} / Günlük: {fmt_float(prev_daily_avg, 2)}  |  "
-                f"Toplam Δ: {fmt_pct(total_delta)} , Günlük Δ: {fmt_pct(avg_delta)})"
-            )
-        else:
-            st.markdown(
-                f"**Toplam DIO:** {fmt_int(dio_total)}  |  "
-                f"**Günlük ortalama DIO:** {fmt_float(dio_daily_avg, 2)}"
-            )
+    base = alt.Chart(dio_df).encode(
+        x=alt.X("TarihLabel:N", title="Gün", sort=alt.SortField(field="Tarih", order="ascending")),
+        y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True, zero=True)),
+        tooltip=[
+            alt.Tooltip("Tarih:T", title="Tarih", format="%d.%m.%Y"),
+            alt.Tooltip("Değer:Q", title="Değer", format=",.0f")
+        ]
+    )
 
-        if dio_df is None or len(dio_df) == 0:
-            st.info("Seçilen model için Günlük DIO Model verisi bulunamadı.")
-        else:
-            import altair as alt
-            BAR_COLOR = "#2a4a7a"
+    bars = base.mark_bar(color=bar_color).properties(height=260)
+    labels = base.mark_text(dy=-5, fontSize=11, color=bar_color).encode(
+        text=alt.Text("Değer:Q", format=",.0f")
+    )
 
-            baslik = f"{selected_perf_model} • Günlük DIO Model • Toplam DIO: {fmt_int(dio_total)}"
-
-            base = alt.Chart(dio_df).encode(
-                x=alt.X("TarihLabel:N", title="Gün", sort=alt.SortField(field="Tarih", order="ascending")),
-                y=alt.Y("Değer:Q", title="Değer", scale=alt.Scale(nice=True, zero=True)),
-                tooltip=[
-                    alt.Tooltip("Tarih:T", title="Tarih", format="%d.%m.%Y"),
-                    alt.Tooltip("Değer:Q", title="Değer", format=",.0f")
-                ]
-            )
-            bars = base.mark_bar(color=BAR_COLOR).properties(height=260)
-            labels = base.mark_text(dy=-5, fontSize=11, color=BAR_COLOR).encode(
-                text=alt.Text("Değer:Q", format=",.0f")
-            )
-
-            chart = (bars + labels).resolve_scale(y='shared').properties(title=baslik)
-            st.altair_chart(chart, use_container_width=True)
+    chart = (bars + labels).resolve_scale(y="shared").properties(title=baslik)
+    st.altair_chart(chart, use_container_width=True)
 
 
 # ================== ODMD SONUÇLARI ==================
@@ -885,16 +917,8 @@ def load_focus_segment_df_from_perf(perf_path: Path, sheet_name: str = "Monthly 
     return data_df
 
 
-def current_month_info():
-    now = datetime.now(IST_TZ)
-    cur_month_idx = now.month - 1
-    prev_idx = (cur_month_idx - 1) % 12
-    last3 = [(prev_idx - 2) % 12, (prev_idx - 1) % 12, prev_idx]
-    return cur_month_idx, prev_idx, last3, now
-
-
-def compute_metrics(df: pd.DataFrame):
-    cur_idx, prev_idx, last3, _ = current_month_info()
+def compute_metrics(df: pd.DataFrame, reference_date: pd.Timestamp | None = None):
+    cur_idx, prev_idx, last3, _ = current_month_info(reference_date)
     prev_month_name = MONTHS_EN[prev_idx]
     last3_names = [MONTHS_EN[i] for i in last3]
 
@@ -939,7 +963,6 @@ def build_odmd_ui(perf_path: Path):
         return
 
     calc_df, prev_month_name, last3_names, ytd_denom = compute_metrics(data_df, reference_date)
-
     calc_df = calc_df[calc_df["YTD"].fillna(0) != 0].copy()
 
     bmw_models = (
@@ -948,6 +971,8 @@ def build_odmd_ui(perf_path: Path):
         .drop_duplicates()
         .tolist()
     )
+    bmw_models = sorted(bmw_models, key=str.casefold)
+
     if not bmw_models:
         st.info("BMW modeli bulunamadı. Lütfen 'Monthly Basis' sayfasındaki verileri kontrol edin.")
         return
@@ -974,7 +999,7 @@ def build_odmd_ui(perf_path: Path):
     view = group_view[["Marka", "Model", "Aylık Satış", "3 Aylık Satış", "YTD Satış"]].copy()
     view = style_bmw_first(view)
 
-    cur_idx, prev_idx, last3, now = current_month_info(reference_date)
+    cur_idx, prev_idx, last3, _ = current_month_info(reference_date)
 
     st.caption(
         f"Kaynak: {Path(perf_path).name} • Sayfa: 'Monthly Basis' • "
@@ -989,9 +1014,7 @@ def build_odmd_ui(perf_path: Path):
         view.style
         .apply(
             lambda s: [
-                "font-weight: 700"
-                if (s.name in view.index and view.loc[s.name, 'Marka'].upper() == 'BMW')
-                else ""
+                "font-weight: 700" if view.loc[s.name, "Marka"].upper() == "BMW" else ""
                 for _ in s
             ],
             axis=1
@@ -1009,14 +1032,9 @@ def build_odmd_ui(perf_path: Path):
     st.download_button(
         "CSV indir (filtrelenmiş)",
         data=csv_bytes,
-        file_name=(
-            f"odmd_sonuclari_"
-            f"{Path(perf_path).stem.replace(' ','_')}_"
-            f"{selected_bmw.replace(' ','_')}.csv"
-        ),
+        file_name=f"odmd_sonuclari_{Path(perf_path).stem.replace(' ','_')}_{selected_bmw.replace(' ','_')}.csv",
         mime="text/csv"
     )
-
 
 
 # ================== UYGULAMA AKIŞI ==================
