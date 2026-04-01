@@ -4,3 +4,7 @@ plotly
 openpyxl>=3.1
 requests
 pytz
+numpy
+matplotlib
+pillow
+altair
